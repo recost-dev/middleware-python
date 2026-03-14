@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ecoapi"
+version = "0.1.0"
+description = "Python SDK for EcoAPI — tracks outbound HTTP API calls and reports cost, latency, and usage patterns."
+readme = "README.md"
+license = "AGPL-3.0-only"
+requires-python = ">=3.9"
+authors = [
+  { name = "Andres Lopez" },
+  { name = "Aslan Wang" },
+  { name = "Donggyu Yoon" },
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: GNU Affero General Public License v3",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: System :: Monitoring",
+]
+
+dependencies = []
+
+[project.optional-dependencies]
+fastapi = ["starlette"]
+flask = ["flask"]
+local = ["websockets"]
+all = ["starlette", "flask", "websockets"]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "httpx>=0.27",
+  "ruff>=0.4",
+  "mypy>=1.10",
+  "flask>=3.0",
+  "starlette>=0.37",
+  "uvicorn>=0.29",
+  "websockets>=12.0",
+  "requests>=2.31",
+  "aiohttp>=3.9",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py39"
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
