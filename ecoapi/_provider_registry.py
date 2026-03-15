@@ -70,6 +70,31 @@ BUILTIN_PROVIDERS: List[ProviderDef] = [
 
     # ── Google Cloud ─────────────────────────────────────────────────────
     ProviderDef(host_pattern="*.googleapis.com", provider="gcp", cost_per_request_cents=0),
+
+    # ── GitHub ───────────────────────────────────────────────────────────
+    ProviderDef(host_pattern="api.github.com", path_prefix="/repos",  provider="github", endpoint_category="repos",  cost_per_request_cents=0),
+    ProviderDef(host_pattern="api.github.com", path_prefix="/users",  provider="github", endpoint_category="users",  cost_per_request_cents=0),
+    ProviderDef(host_pattern="api.github.com", path_prefix="/search", provider="github", endpoint_category="search", cost_per_request_cents=0),
+    ProviderDef(host_pattern="api.github.com",                         provider="github",                             cost_per_request_cents=0),
+
+    # ── CoinGecko ────────────────────────────────────────────────────────
+    ProviderDef(host_pattern="api.coingecko.com", path_prefix="/api/v3/simple/price", provider="coingecko", endpoint_category="simple_price", cost_per_request_cents=0),
+    ProviderDef(host_pattern="api.coingecko.com", path_prefix="/api/v3/coins",        provider="coingecko", endpoint_category="coins",         cost_per_request_cents=0),
+    ProviderDef(host_pattern="api.coingecko.com",                                      provider="coingecko",                                    cost_per_request_cents=0),
+
+    # ── Hacker News ──────────────────────────────────────────────────────
+    ProviderDef(host_pattern="hacker-news.firebaseio.com", path_prefix="/v0/topstories", provider="hackernews", endpoint_category="topstories", cost_per_request_cents=0),
+    ProviderDef(host_pattern="hacker-news.firebaseio.com", path_prefix="/v0/item",       provider="hackernews", endpoint_category="item",       cost_per_request_cents=0),
+    ProviderDef(host_pattern="hacker-news.firebaseio.com",                                provider="hackernews",                                 cost_per_request_cents=0),
+
+    # ── wttr.in (weather) ────────────────────────────────────────────────
+    ProviderDef(host_pattern="wttr.in", provider="wttr", endpoint_category="weather", cost_per_request_cents=0),
+
+    # ── ZenQuotes ────────────────────────────────────────────────────────
+    ProviderDef(host_pattern="zenquotes.io", provider="zenquotes", endpoint_category="random_quote", cost_per_request_cents=0),
+
+    # ── ip-api (geolocation) ─────────────────────────────────────────────
+    ProviderDef(host_pattern="ip-api.com", provider="ip-api", endpoint_category="geolocation", cost_per_request_cents=0),
 ]
 
 

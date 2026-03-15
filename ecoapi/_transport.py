@@ -43,6 +43,7 @@ def _post_cloud(
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {api_key}",
+                    "User-Agent": "ecoapi-python/0.1.0",
                 },
                 method="POST",
             )
@@ -56,6 +57,11 @@ def _post_cloud(
             last_error = Exception(f"HTTP {status}")
         except urllib.error.HTTPError as e:
             if 400 <= e.code < 500:
+                try:
+                    body = e.read().decode("utf-8", errors="replace")
+                    logger.error("[ecoapi] cloud rejected payload (%s): %s", e.code, body)
+                except Exception:
+                    pass
                 return  # Don't retry 4xx
             last_error = e
         except Exception as e:
