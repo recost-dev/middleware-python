@@ -1,4 +1,4 @@
-# ecoapi
+# recost
 
 Python SDK for [ReCost](https://recost.dev) — automatically tracks outbound HTTP API calls from your application and reports cost, latency, and usage patterns to the ReCost dashboard or your local VS Code extension.
 
@@ -28,16 +28,16 @@ Your app
 ## Installation
 
 ```bash
-pip install ecoapi
+pip install recost
 ```
 
 With optional framework and local mode extras:
 
 ```bash
-pip install ecoapi[fastapi]   # FastAPI/Starlette middleware
-pip install ecoapi[flask]     # Flask extension
-pip install ecoapi[local]     # WebSocket for VS Code extension
-pip install ecoapi[all]       # Everything
+pip install recost[fastapi]   # FastAPI/Starlette middleware
+pip install recost[flask]     # Flask extension
+pip install recost[local]     # WebSocket for VS Code extension
+pip install recost[all]       # Everything
 ```
 
 ## Quick start
@@ -47,7 +47,7 @@ pip install ecoapi[all]       # Everything
 No API key needed. Telemetry goes to the ReCost VS Code extension over localhost.
 
 ```python
-from ecoapi import init
+from recost import init
 
 init()  # all defaults — local mode on port 9847
 ```
@@ -56,11 +56,11 @@ init()  # all defaults — local mode on port 9847
 
 ```python
 import os
-from ecoapi import init
+from recost import init, RecostConfig
 
-init(EcoAPIConfig(
-    api_key=os.environ["ECOAPI_KEY"],
-    project_id=os.environ["ECOAPI_PROJECT_ID"],
+init(RecostConfig(
+    api_key=os.environ["RECOST_API_KEY"],
+    project_id=os.environ["RECOST_PROJECT_ID"],
     environment=os.environ.get("PYTHON_ENV", "development"),
 ))
 ```
@@ -69,20 +69,20 @@ init(EcoAPIConfig(
 
 ```python
 from fastapi import FastAPI
-from ecoapi.frameworks.fastapi import EcoAPIMiddleware
+from recost.frameworks.fastapi import RecostMiddleware
 
 app = FastAPI()
-app.add_middleware(EcoAPIMiddleware, api_key="...", project_id="...")
+app.add_middleware(RecostMiddleware, api_key="...", project_id="...")
 ```
 
 ### Flask
 
 ```python
 from flask import Flask
-from ecoapi.frameworks.flask import EcoAPI
+from recost.frameworks.flask import ReCost
 
 app = Flask(__name__)
-eco = EcoAPI(app, api_key="...", project_id="...")
+eco = ReCost(app, api_key="...", project_id="...")
 ```
 
 ## Configuration
@@ -91,7 +91,7 @@ All fields are optional.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `api_key` | `str` | — | ReCost API key. If omitted, runs in local mode. |
+| `api_key` | `str` | — | ReCost API key (`rc-...`). If omitted, runs in local mode. |
 | `project_id` | `str` | — | ReCost project ID. Required in cloud mode. |
 | `environment` | `str` | `"development"` | Environment tag attached to all telemetry. |
 | `flush_interval` | `float` | `30.0` | Seconds between automatic flushes. |
@@ -108,9 +108,9 @@ All fields are optional.
 ### Custom providers
 
 ```python
-from ecoapi import init, EcoAPIConfig, ProviderDef
+from recost import init, RecostConfig, ProviderDef
 
-init(EcoAPIConfig(
+init(RecostConfig(
     custom_providers=[
         ProviderDef(
             host_pattern="api.internal.acme.com",
@@ -128,7 +128,7 @@ init(EcoAPIConfig(
 `init()` returns a handle with a `dispose()` method that stops the interceptor, cancels the flush timer, and closes the transport connection.
 
 ```python
-handle = init(EcoAPIConfig(api_key="..."))
+handle = init(RecostConfig(api_key="..."))
 
 # Later — e.g. in a test teardown or process shutdown handler:
 handle.dispose()
@@ -138,9 +138,9 @@ handle.dispose()
 
 ```python
 import os
-from ecoapi import init, EcoAPIConfig
+from recost import init, RecostConfig
 
-init(EcoAPIConfig(enabled=os.environ.get("PYTHON_ENV") != "test"))
+init(RecostConfig(enabled=os.environ.get("PYTHON_ENV") != "test"))
 ```
 
 ## Supported providers
@@ -176,11 +176,11 @@ Unrecognized hosts produce a `RawEvent` with `provider=None` — they still appe
 ## Core types
 
 ```python
-from ecoapi import (
+from recost import (
     RawEvent,
     MetricEntry,
     WindowSummary,
-    EcoAPIConfig,
+    RecostConfig,
     ProviderDef,
     TransportMode,
 )
@@ -195,35 +195,7 @@ pytest
 
 ## API reference
 
-All requests go to `https://api.recost.dev`. No authentication is required for project management endpoints.
-
-### Create a project
-
-```bash
-curl -s -X POST https://api.recost.dev/projects \
-  -H "Content-Type: application/json" \
-  -d '{"name": "my-app", "description": "optional"}' | jq .
-```
-
-Copy the `id` from the response — that's your `project_id`.
-
-### List your projects
-
-```bash
-curl -s https://api.recost.dev/projects | jq .
-```
-
-### View analytics for a project
-
-```bash
-curl -s "https://api.recost.dev/projects/{project_id}/analytics" | jq .
-```
-
-### View cost breakdown by provider
-
-```bash
-curl -s "https://api.recost.dev/projects/{project_id}/cost/by-provider" | jq .
-```
+All requests go to `https://api.recost.dev`. Authentication uses an `rc-` prefixed API key passed as `Authorization: Bearer {api_key}`.
 
 ### Send telemetry manually (what the SDK does on flush)
 
@@ -232,6 +204,20 @@ curl -s -X POST https://api.recost.dev/projects/{project_id}/telemetry \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer {api_key}" \
   -d @payload.json | jq .
+```
+
+### View recent telemetry windows
+
+```bash
+curl -s "https://api.recost.dev/projects/{project_id}/telemetry/recent?limit=10" \
+  -H "Authorization: Bearer {api_key}" | jq .
+```
+
+### View analytics for a project
+
+```bash
+curl -s "https://api.recost.dev/projects/{project_id}/analytics?from=2026-01-01T00:00:00Z&to=2026-12-31T23:59:59Z" \
+  -H "Authorization: Bearer {api_key}" | jq .
 ```
 
 ## License
