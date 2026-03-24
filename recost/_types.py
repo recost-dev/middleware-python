@@ -1,5 +1,5 @@
 """
-Core type definitions for the ecoapi Python SDK.
+Core type definitions for the recost Python SDK.
 Every other module imports from here. No runtime logic, no external imports.
 
 These produce the exact same JSON field names as the Node SDK's types.ts when
@@ -117,11 +117,11 @@ class ProviderDef:
 
 
 # ---------------------------------------------------------------------------
-# EcoAPIConfig
+# RecostConfig
 # ---------------------------------------------------------------------------
 
 @dataclass
-class EcoAPIConfig:
+class RecostConfig:
     """Configuration passed to init() or a framework wrapper. All fields optional."""
 
     api_key: Optional[str] = None
@@ -134,7 +134,7 @@ class EcoAPIConfig:
     enabled: bool = True
     custom_providers: List[ProviderDef] = field(default_factory=list)
     exclude_patterns: List[str] = field(default_factory=list)
-    base_url: str = "https://api.ecoapi.dev"
+    base_url: str = "https://api.recost.dev"
     max_retries: int = 3
     on_error: Optional[Callable[[Exception], None]] = None
 

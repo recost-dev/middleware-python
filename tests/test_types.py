@@ -1,6 +1,6 @@
-"""Tests for ecoapi/_types.py — serialization to camelCase."""
+"""Tests for recost/_types.py — serialization to camelCase."""
 
-from ecoapi import MetricEntry, WindowSummary
+from recost import MetricEntry, WindowSummary
 
 
 def test_metric_entry_to_dict_camel_case():

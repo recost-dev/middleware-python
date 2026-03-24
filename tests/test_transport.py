@@ -1,5 +1,5 @@
 """
-Tests for ecoapi/_transport.py
+Tests for recost/_transport.py
 """
 
 import json
@@ -8,8 +8,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from ecoapi._transport import Transport, _post_cloud
-from ecoapi._types import EcoAPIConfig, MetricEntry, WindowSummary
+from recost._transport import Transport, _post_cloud
+from recost._types import RecostConfig, MetricEntry, WindowSummary
 
 
 def _make_summary() -> WindowSummary:
@@ -80,12 +80,12 @@ def cloud_server():
 
 class TestTransportMode:
     def test_cloud_mode_when_api_key_present(self):
-        t = Transport(EcoAPIConfig(api_key="test-key"))
+        t = Transport(RecostConfig(api_key="test-key"))
         assert t.mode == "cloud"
         t.dispose()
 
     def test_local_mode_when_no_api_key(self):
-        t = Transport(EcoAPIConfig())
+        t = Transport(RecostConfig())
         assert t.mode == "local"
         t.dispose()
 
@@ -97,7 +97,7 @@ class TestTransportMode:
 class TestCloudTransport:
     def test_sends_post_to_correct_url(self, cloud_server):
         base_url, _ = cloud_server
-        config = EcoAPIConfig(
+        config = RecostConfig(
             api_key="test-key",
             project_id="proj-123",
             base_url=base_url,
@@ -117,7 +117,7 @@ class TestCloudTransport:
     def test_no_retry_on_4xx(self, cloud_server):
         base_url, _ = cloud_server
         _CloudHandler.response_code = 400
-        config = EcoAPIConfig(
+        config = RecostConfig(
             api_key="test-key",
             project_id="proj-123",
             base_url=base_url,

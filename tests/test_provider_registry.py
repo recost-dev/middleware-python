@@ -1,5 +1,5 @@
 """
-Tests for ecoapi/_provider_registry.py
+Tests for recost/_provider_registry.py
 
 Covers: built-in provider matching, edge cases, custom provider priority,
 wildcard hosts, Twilio refinement, BUILTIN_PROVIDERS array shape.
@@ -7,7 +7,7 @@ wildcard hosts, Twilio refinement, BUILTIN_PROVIDERS array shape.
 Ported from the Node SDK's provider-registry.test.ts.
 """
 
-from ecoapi import ProviderRegistry, BUILTIN_PROVIDERS
+from recost import ProviderRegistry, BUILTIN_PROVIDERS
 
 
 class TestBuiltinProviders:
@@ -360,4 +360,4 @@ class TestBuiltinProvidersArray:
 
 
 # Need to import ProviderDef for custom provider tests
-from ecoapi import ProviderDef  # noqa: E402
+from recost import ProviderDef  # noqa: E402

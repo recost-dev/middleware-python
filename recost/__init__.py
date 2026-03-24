@@ -1,31 +1,31 @@
 """
-ecoapi — Python SDK for EcoAPI.
+recost — Python SDK for ReCost.
 
 Tracks outbound HTTP API calls and reports cost, latency, and usage patterns
-to the EcoAPI dashboard or your local VS Code extension.
+to the ReCost dashboard or your local VS Code extension.
 """
 
 from ._types import (
-    EcoAPIConfig,
+    RecostConfig,
     MetricEntry,
     ProviderDef,
     RawEvent,
     TransportMode,
     WindowSummary,
 )
-from ._init import EcoAPIHandle, init
+from ._init import RecostHandle, init
 from ._provider_registry import BUILTIN_PROVIDERS, MatchResult, ProviderRegistry
 from ._interceptor import install, uninstall, is_installed
 from ._aggregator import Aggregator
 
 __all__ = [
     "init",
-    "EcoAPIHandle",
+    "RecostHandle",
     "RawEvent",
     "MetricEntry",
     "WindowSummary",
     "ProviderDef",
-    "EcoAPIConfig",
+    "RecostConfig",
     "TransportMode",
     "ProviderRegistry",
     "BUILTIN_PROVIDERS",

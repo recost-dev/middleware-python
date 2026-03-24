@@ -1,7 +1,7 @@
-"""Shared fixtures for all ecoapi tests."""
+"""Shared fixtures for all recost tests."""
 
 import pytest
-from ecoapi._interceptor import uninstall
+from recost._interceptor import uninstall
 
 
 @pytest.fixture(autouse=True)

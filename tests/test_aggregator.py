@@ -1,13 +1,13 @@
 """
-Tests for ecoapi/_aggregator.py
+Tests for recost/_aggregator.py
 
 Ported from the Node SDK's aggregator.test.ts.
 """
 
 from datetime import datetime, timezone
 
-from ecoapi._aggregator import Aggregator
-from ecoapi._types import RawEvent
+from recost._aggregator import Aggregator
+from recost._types import RawEvent
 
 
 def make_event(**overrides) -> RawEvent:

@@ -13,10 +13,10 @@ from ._aggregator import Aggregator
 from ._interceptor import install, uninstall
 from ._provider_registry import ProviderRegistry
 from ._transport import Transport
-from ._types import EcoAPIConfig, RawEvent
+from ._types import RecostConfig, RawEvent
 
 
-class EcoAPIHandle:
+class RecostHandle:
     """Returned by init() to allow explicit teardown."""
 
     def __init__(
@@ -51,12 +51,12 @@ class EcoAPIHandle:
 
 
 # Module-level handle so a second init() call disposes the first.
-_handle: Optional[EcoAPIHandle] = None
+_handle: Optional[RecostHandle] = None
 
 
-def init(config: Optional[EcoAPIConfig] = None) -> EcoAPIHandle:
+def init(config: Optional[RecostConfig] = None) -> RecostHandle:
     """
-    Initialize the EcoAPI SDK.
+    Initialize the ReCost SDK.
 
     - Patches urllib3, httpx, and aiohttp.
     - Starts a flush interval that sends aggregated telemetry.
@@ -66,12 +66,12 @@ def init(config: Optional[EcoAPIConfig] = None) -> EcoAPIHandle:
     if _handle is not None:
         _handle.dispose()
 
-    config = config or EcoAPIConfig()
+    config = config or RecostConfig()
 
     if not config.enabled:
         stop_event = threading.Event()
         stop_event.set()
-        noop = EcoAPIHandle(timer_stop=stop_event, timer_thread=None, transport=None)
+        noop = RecostHandle(timer_stop=stop_event, timer_thread=None, transport=None)
         _handle = noop
         return noop
 
@@ -99,7 +99,7 @@ def init(config: Optional[EcoAPIConfig] = None) -> EcoAPIHandle:
             return
         if debug:
             print(
-                f"[ecoapi] flush: {len(summary.metrics)} metric group(s), "
+                f"[recost] flush: {len(summary.metrics)} metric group(s), "
                 f"window {summary.window_start} → {summary.window_end}",
                 file=sys.stderr,
             )
@@ -119,7 +119,7 @@ def init(config: Optional[EcoAPIConfig] = None) -> EcoAPIHandle:
 
         if debug:
             print(
-                f"[ecoapi] captured {event.method} {event.url} "
+                f"[recost] captured {event.method} {event.url} "
                 f"{event.status_code} ({event.latency_ms}ms)",
                 file=sys.stderr,
             )
@@ -135,7 +135,7 @@ def init(config: Optional[EcoAPIConfig] = None) -> EcoAPIHandle:
                 if config.on_error:
                     config.on_error(err)
                 elif debug:
-                    print(f"[ecoapi] flush error: {err}", file=sys.stderr)
+                    print(f"[recost] flush error: {err}", file=sys.stderr)
 
     install(on_event)
 
@@ -150,12 +150,12 @@ def init(config: Optional[EcoAPIConfig] = None) -> EcoAPIHandle:
                 if config.on_error:
                     config.on_error(err)
                 elif debug:
-                    print(f"[ecoapi] flush error: {err}", file=sys.stderr)
+                    print(f"[recost] flush error: {err}", file=sys.stderr)
 
     timer_thread = threading.Thread(target=_timer_loop, daemon=True)
     timer_thread.start()
 
-    handle = EcoAPIHandle(
+    handle = RecostHandle(
         timer_stop=stop_event,
         timer_thread=timer_thread,
         transport=transport,

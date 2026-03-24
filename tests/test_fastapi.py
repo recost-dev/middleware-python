@@ -1,11 +1,11 @@
 """
-Tests for ecoapi/frameworks/fastapi.py
+Tests for recost/frameworks/fastapi.py
 """
 
 import pytest
 
-from ecoapi._interceptor import is_installed, uninstall
-from ecoapi._types import EcoAPIConfig
+from recost._interceptor import is_installed, uninstall
+from recost._types import RecostConfig
 
 
 class TestFastAPIMiddleware:
@@ -15,13 +15,13 @@ class TestFastAPIMiddleware:
             from starlette.responses import PlainTextResponse
             from starlette.routing import Route
             from starlette.testclient import TestClient
-            from ecoapi.frameworks.fastapi import EcoAPIMiddleware
+            from recost.frameworks.fastapi import RecostMiddleware
 
             def homepage(request):
                 return PlainTextResponse("ok")
 
             app = Starlette(routes=[Route("/", homepage)])
-            app.add_middleware(EcoAPIMiddleware, config=EcoAPIConfig(enabled=True))
+            app.add_middleware(RecostMiddleware, config=RecostConfig(enabled=True))
             client = TestClient(app)
             # Trigger a request so middleware is instantiated
             resp = client.get("/")
@@ -36,13 +36,13 @@ class TestFastAPIMiddleware:
             from starlette.responses import PlainTextResponse
             from starlette.routing import Route
             from starlette.testclient import TestClient
-            from ecoapi.frameworks.fastapi import EcoAPIMiddleware
+            from recost.frameworks.fastapi import RecostMiddleware
 
             def homepage(request):
                 return PlainTextResponse("ok")
 
             app = Starlette(routes=[Route("/", homepage)])
-            app.add_middleware(EcoAPIMiddleware, enabled=True, debug=False)
+            app.add_middleware(RecostMiddleware, enabled=True, debug=False)
             client = TestClient(app)
             resp = client.get("/")
             assert resp.status_code == 200

@@ -1,5 +1,5 @@
 """
-Tests for ecoapi/_interceptor.py
+Tests for recost/_interceptor.py
 
 Tests urllib3 (via requests), httpx sync, httpx async interception.
 """
@@ -9,8 +9,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from ecoapi._interceptor import install, is_installed, uninstall
-from ecoapi._types import RawEvent
+from recost._interceptor import install, is_installed, uninstall
+from recost._types import RawEvent
 
 
 # ---------------------------------------------------------------------------

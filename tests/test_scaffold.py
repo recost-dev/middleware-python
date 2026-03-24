@@ -2,15 +2,15 @@
 Scaffold smoke tests — verifies the package exports resolve without errors.
 """
 
-from ecoapi import (
+from recost import (
     Aggregator,
     BUILTIN_PROVIDERS,
     ProviderRegistry,
     is_installed,
     uninstall,
 )
-from ecoapi._transport import Transport
-from ecoapi._types import EcoAPIConfig
+from recost._transport import Transport
+from recost._types import RecostConfig
 
 
 class TestScaffold:
@@ -28,11 +28,11 @@ class TestScaffold:
         assert agg.size == 0
 
     def test_transport_local_mode_when_no_key(self):
-        transport = Transport(EcoAPIConfig())
+        transport = Transport(RecostConfig())
         assert transport.mode == "local"
         transport.dispose()
 
     def test_transport_cloud_mode_when_key_set(self):
-        transport = Transport(EcoAPIConfig(api_key="test-key"))
+        transport = Transport(RecostConfig(api_key="test-key"))
         assert transport.mode == "cloud"
         transport.dispose()

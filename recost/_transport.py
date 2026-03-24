@@ -1,7 +1,7 @@
 """
 Transport — delivers WindowSummary payloads to either:
-  - api.ecoapi.dev (cloud mode) via HTTPS POST with exponential-backoff retry, or
-  - the EcoAPI VS Code extension (local mode) via WebSocket on localhost.
+  - api.recost.dev (cloud mode) via HTTPS POST with exponential-backoff retry, or
+  - the ReCost VS Code extension (local mode) via WebSocket on localhost.
 
 Uses urllib.request (stdlib) for cloud transport to avoid self-instrumentation
 (the interceptor patches urllib3, not urllib.request).
@@ -17,9 +17,9 @@ import time
 import urllib.request
 from typing import Optional
 
-from ._types import EcoAPIConfig, TransportMode, WindowSummary
+from ._types import RecostConfig, TransportMode, WindowSummary
 
-logger = logging.getLogger("ecoapi")
+logger = logging.getLogger("recost")
 
 # ---------------------------------------------------------------------------
 # Cloud transport
@@ -43,7 +43,7 @@ def _post_cloud(
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {api_key}",
-                    "User-Agent": "ecoapi-python/0.1.0",
+                    "User-Agent": "recost-python/0.1.0",
                 },
                 method="POST",
             )
@@ -59,7 +59,7 @@ def _post_cloud(
             if 400 <= e.code < 500:
                 try:
                     body = e.read().decode("utf-8", errors="replace")
-                    logger.error("[ecoapi] cloud rejected payload (%s): %s", e.code, body)
+                    logger.error("[recost] cloud rejected payload (%s): %s", e.code, body)
                 except Exception:
                     pass
                 return  # Don't retry 4xx
@@ -97,7 +97,7 @@ class _LocalTransport:
             self._has_websockets = False
             if not self._warned:
                 logger.warning(
-                    "Install 'websockets' package for local mode: pip install ecoapi[local]"
+                    "Install 'websockets' package for local mode: pip install recost[local]"
                 )
                 self._warned = True
             return
@@ -163,7 +163,7 @@ class _LocalTransport:
 class Transport:
     """Delivers WindowSummary objects to the cloud API or the local VS Code extension."""
 
-    def __init__(self, config: EcoAPIConfig) -> None:
+    def __init__(self, config: RecostConfig) -> None:
         self.mode: TransportMode = "cloud" if config.api_key else "local"
         self._api_key = config.api_key or ""
         self._project_id = config.project_id or ""
@@ -191,7 +191,7 @@ class Transport:
             if self._on_error is not None:
                 self._on_error(exc)
             elif self._debug:
-                logger.error("[ecoapi] transport error: %s", exc)
+                logger.error("[recost] transport error: %s", exc)
 
     def dispose(self) -> None:
         """Clean up WebSocket thread / connections."""
