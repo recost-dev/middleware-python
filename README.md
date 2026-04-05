@@ -222,4 +222,4 @@ curl -s "https://api.recost.dev/projects/{project_id}/analytics?from=2026-01-01T
 
 ## License
 
-Licensed under the [GNU Affero General Public License v3.0](LICENSE) © 2026 Andres Lopez, Aslan Wang, Donggyu Yoon.
+Licensed under the [Business Source License 1.1](LICENSE) © 2026 Andres Lopez, Aslan Wang, Donggyu Yoon. Converts to Apache 2.0 on 2030-04-02.

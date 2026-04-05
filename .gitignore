@@ -4,8 +4,10 @@ __pycache__/
 .venv/
 *.egg-info/
 dist/
+build/
 
 # Sensitive
 .env
 .env.local
 .env.*.local
+.env*
