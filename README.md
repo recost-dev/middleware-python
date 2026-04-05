@@ -1,10 +1,12 @@
 # recost
 
-Python SDK for [ReCost](https://recost.dev) — automatically tracks outbound HTTP API calls from your application and reports cost, latency, and usage patterns to the ReCost dashboard or your local VS Code extension.
+Python SDK for [Recost](https://recost.dev) — automatically tracks outbound HTTP API calls from your application and reports cost, latency, and usage patterns to the Recost dashboard or your local VS Code extension.
+
+**Requires Python 3.9+. No core dependencies.**
 
 ## How it works
 
-The SDK monkey-patches `urllib3`, `httpx`, and `aiohttp` to intercept outbound requests at runtime. It captures metadata only (URL, method, status, latency, byte sizes — never headers or bodies), matches each request against a built-in provider registry, aggregates events into time-windowed summaries, and ships those summaries either to the ReCost cloud API or to the ReCost VS Code extension running locally.
+The SDK patches `urllib3`, `httpx`, and `aiohttp` to intercept outbound requests at runtime. It captures metadata only (URL, method, status, latency, byte sizes — never headers or bodies), matches each request against a built-in provider registry, aggregates events into time-windowed summaries, and ships those summaries to the Recost cloud API or the Recost VS Code extension running locally.
 
 ```
 Your app
@@ -36,7 +38,7 @@ With optional framework and local mode extras:
 ```bash
 pip install recost[fastapi]   # FastAPI/Starlette middleware
 pip install recost[flask]     # Flask extension
-pip install recost[local]     # WebSocket for VS Code extension
+pip install recost[local]     # WebSocket transport for VS Code extension
 pip install recost[all]       # Everything
 ```
 
@@ -44,12 +46,12 @@ pip install recost[all]       # Everything
 
 ### Local mode (VS Code extension)
 
-No API key needed. Telemetry goes to the ReCost VS Code extension over localhost.
+No API key needed. Telemetry goes to the Recost VS Code extension over localhost.
 
 ```python
 from recost import init
 
-init()  # all defaults — local mode on port 9847
+init()  # defaults — local mode on port 9847
 ```
 
 ### Cloud mode
@@ -82,25 +84,32 @@ from flask import Flask
 from recost.frameworks.flask import ReCost
 
 app = Flask(__name__)
-eco = ReCost(app, api_key="...", project_id="...")
+ReCost(app, api_key="...", project_id="...")
+```
+
+Or using the `init_app` pattern:
+
+```python
+recost = ReCost()
+recost.init_app(app, api_key="...", project_id="...")
 ```
 
 ## Configuration
 
-All fields are optional.
+All fields are optional. Pass them as keyword arguments or via a `RecostConfig` instance.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `api_key` | `str` | — | ReCost API key (`rc-...`). If omitted, runs in local mode. |
-| `project_id` | `str` | — | ReCost project ID. Required in cloud mode. |
+| `api_key` | `str` | — | Recost API key (`rc-...`). If omitted, runs in local mode. |
+| `project_id` | `str` | — | Recost project ID. Required in cloud mode. |
 | `environment` | `str` | `"development"` | Environment tag attached to all telemetry. |
 | `flush_interval` | `float` | `30.0` | Seconds between automatic flushes. |
 | `max_batch_size` | `int` | `100` | Early-flush threshold (number of events). |
 | `local_port` | `int` | `9847` | WebSocket port for the VS Code extension. |
 | `debug` | `bool` | `False` | Log telemetry activity to stderr. |
-| `enabled` | `bool` | `True` | Master kill switch. Set `False` to disable in tests. |
-| `custom_providers` | `list[ProviderDef]` | `[]` | Extra provider rules merged with higher priority than built-ins. |
-| `exclude_patterns` | `list[str]` | `[]` | URL substrings that cause a request to be silently dropped. |
+| `enabled` | `bool` | `True` | Master kill switch — set `False` to disable entirely. |
+| `custom_providers` | `list[ProviderDef]` | `[]` | Extra provider rules with higher priority than built-ins. |
+| `exclude_patterns` | `list[str]` | `[]` | URL substrings — matching requests are silently dropped. |
 | `base_url` | `str` | `"https://api.recost.dev"` | Override for self-hosted deployments. |
 | `max_retries` | `int` | `3` | Retry attempts for failed cloud flushes. |
 | `on_error` | `Callable` | — | Called on internal SDK errors. |
@@ -130,7 +139,7 @@ init(RecostConfig(
 ```python
 handle = init(RecostConfig(api_key="..."))
 
-# Later — e.g. in a test teardown or process shutdown handler:
+# In a test teardown or shutdown handler:
 handle.dispose()
 ```
 
@@ -145,7 +154,7 @@ init(RecostConfig(enabled=os.environ.get("PYTHON_ENV") != "test"))
 
 ## Supported providers
 
-The registry ships with built-in rules for these providers. Cost estimates are rough per-request averages for relative comparison — actual costs vary by model, token count, and region.
+Built-in rules ship for the providers below. Cost estimates are rough per-request averages for relative comparison — actual costs vary by model, token count, and region.
 
 | Provider | Host | Tracked endpoints | Cost estimate |
 |---|---|---|---|
@@ -158,7 +167,7 @@ The registry ships with built-in rules for these providers. Cost estimates are r
 | **AWS** | `*.amazonaws.com` | all services (wildcard) | 0¢ (complex pricing) |
 | **Google Cloud** | `*.googleapis.com` | all services (wildcard) | 0¢ (complex pricing) |
 
-Unrecognized hosts produce a `RawEvent` with `provider=None` — they still appear in telemetry grouped under `"unknown"`.
+Unrecognized hosts still appear in telemetry, grouped under `"unknown"`.
 
 ## What is captured (and what is not)
 
@@ -170,34 +179,36 @@ Unrecognized hosts produce a `RawEvent` with `provider=None` — they still appe
 - Matched provider, endpoint category, and estimated cost
 
 **Never captured:**
-- Request or response headers (contain API keys)
+- Request or response headers (may contain API keys)
 - Request or response body content (may contain user data or PII)
 
 ## Core types
 
 ```python
 from recost import (
-    RawEvent,
-    MetricEntry,
-    WindowSummary,
-    RecostConfig,
-    ProviderDef,
-    TransportMode,
+    RawEvent,       # A single intercepted HTTP request
+    MetricEntry,    # Aggregated stats for one provider + endpoint + method
+    WindowSummary,  # Flush payload sent to the API or VS Code extension
+    RecostConfig,   # SDK configuration
+    ProviderDef,    # A custom provider matching rule
+    TransportMode,  # Literal["local", "cloud"]
 )
 ```
 
-## Testing
+## Development
 
 ```bash
 pip install -e ".[dev]"
-pytest
+pytest          # run all tests
+ruff check .    # lint
+mypy recost/    # type check
 ```
 
 ## API reference
 
-All requests go to `https://api.recost.dev`. Authentication uses an `rc-` prefixed API key passed as `Authorization: Bearer {api_key}`.
+All requests go to `https://api.recost.dev`. Authentication uses a `rc-` prefixed API key as `Authorization: Bearer {api_key}`.
 
-### Send telemetry manually (what the SDK does on flush)
+### Send telemetry (what the SDK does on flush)
 
 ```bash
 curl -s -X POST https://api.recost.dev/projects/{project_id}/telemetry \
@@ -213,7 +224,7 @@ curl -s "https://api.recost.dev/projects/{project_id}/telemetry/recent?limit=10"
   -H "Authorization: Bearer {api_key}" | jq .
 ```
 
-### View analytics for a project
+### View analytics
 
 ```bash
 curl -s "https://api.recost.dev/projects/{project_id}/analytics?from=2026-01-01T00:00:00Z&to=2026-12-31T23:59:59Z" \
