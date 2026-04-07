@@ -1,4 +1,4 @@
-# ecoapi — Python Middleware
+# recost — Python Middleware
 
 Python SDK that automatically tracks outbound HTTP API calls, matches them against a built-in provider registry, aggregates events into time-windowed summaries, and ships telemetry to the ReCost cloud API or VS Code extension.
 
@@ -14,7 +14,7 @@ Python SDK that automatically tracks outbound HTTP API calls, matches them again
 ## Project Structure
 
 ```
-ecoapi/
+recost/
   __init__.py               # Public API surface (re-exports only)
   _init.py                  # Main entry point — wires interceptor, registry, aggregator, transport; returns EcoAPIHandle
   _types.py                 # All types: RawEvent, MetricEntry, WindowSummary, ProviderDef, EcoAPIConfig, TransportMode
@@ -46,8 +46,8 @@ LICENSE
 ```bash
 pip install -e ".[dev]"    # Install with dev dependencies
 pytest                     # Run all tests
-ruff check ecoapi/         # Lint
-mypy ecoapi/               # Type check (strict mode)
+ruff check recost/         # Lint
+mypy recost/               # Type check (strict mode)
 ```
 
 ## Architecture Notes
