@@ -30,7 +30,7 @@ class MatchResult:
 
 
 # ---------------------------------------------------------------------------
-# Built-in provider definitions (same 21 rules as Node SDK, same order)
+# Built-in provider definitions (same 34 rules as Node SDK, same order)
 # ---------------------------------------------------------------------------
 
 BUILTIN_PROVIDERS: List[ProviderDef] = [
