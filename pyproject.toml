@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "recost"
-version = "0.2.0"
+version = "0.1.1"
 description = "Recost middleware for Python — API cost intelligence"
 readme = "README.md"
 license = { file = "LICENSE" }
