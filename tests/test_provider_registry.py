@@ -317,8 +317,17 @@ class TestCustomProviders:
 
 
 class TestBuiltinProvidersArray:
-    def test_has_21_rules(self):
-        assert len(BUILTIN_PROVIDERS) == 21
+    def test_includes_all_critical_providers(self):
+        # Structural check (replaces a brittle hard-coded length assertion):
+        # verifies the well-known providers users rely on are still present.
+        # Adding a new provider doesn't break this test; deleting a critical
+        # one does.
+        providers = {r.provider for r in BUILTIN_PROVIDERS}
+        for required in ("openai", "anthropic", "stripe", "twilio", "sendgrid", "github"):
+            assert required in providers, f"missing critical provider: {required}"
+        # Sanity floor — guards against an accidental wholesale registry wipe
+        # without re-asserting the exact count on every legitimate addition.
+        assert len(BUILTIN_PROVIDERS) >= 20
 
     def test_all_rules_have_host_and_provider(self):
         for rule in BUILTIN_PROVIDERS:

@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import sys
 import threading
-from typing import Optional
+import warnings
+from typing import Callable, Optional
 
 from ._aggregator import Aggregator
 from ._interceptor import install, uninstall
 from ._provider_registry import ProviderRegistry
 from ._transport import Transport
-from ._types import RecostConfig, RawEvent
+from ._types import FlushStatus, RecostConfig, RawEvent
 
 
 class RecostHandle:
@@ -24,14 +25,32 @@ class RecostHandle:
         timer_stop: threading.Event,
         timer_thread: Optional[threading.Thread],
         transport: Optional[Transport],
+        final_flush: Optional[Callable[[], None]] = None,
+        shutdown_flush_timeout_ms: int = 3_000,
     ) -> None:
         self._timer_stop = timer_stop
         self._timer_thread = timer_thread
         self._transport = transport
+        self._final_flush = final_flush
+        self._shutdown_flush_timeout_ms = shutdown_flush_timeout_ms
         self._disposed = False
 
+    @property
+    def last_flush_status(self) -> Optional[FlushStatus]:
+        """Outcome of the most recent flush, or None if none has completed yet."""
+        if self._transport is None:
+            return None
+        return self._transport.last_flush_status
+
     def dispose(self) -> None:
-        """Stop intercepting, flush remaining events, and close transport connections."""
+        """Stop intercepting, flush remaining events, and close transport connections.
+
+        Stops the periodic timer first so no new flush can race the shutdown
+        flush, then runs one final flush in a worker thread bounded by
+        ``shutdown_flush_timeout_ms``. The transport is only disposed after
+        the final flush settles or its timeout elapses, so an in-flight
+        cloud POST is not cut off mid-request.
+        """
         if self._disposed:
             return
         self._disposed = True
@@ -39,6 +58,11 @@ class RecostHandle:
         self._timer_stop.set()
         if self._timer_thread is not None:
             self._timer_thread.join(timeout=5.0)
+
+        if self._final_flush is not None:
+            flush_thread = threading.Thread(target=self._final_flush, daemon=True)
+            flush_thread.start()
+            flush_thread.join(timeout=self._shutdown_flush_timeout_ms / 1000.0)
 
         uninstall()
 
@@ -68,6 +92,19 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
 
     config = config or RecostConfig()
 
+    # Resolve flush interval: prefer the new ms-based field, but if a caller
+    # still passes the legacy seconds-based flush_interval, honor it with a
+    # deprecation warning so existing code keeps working until they migrate.
+    if config.flush_interval is not None:
+        warnings.warn(
+            "flush_interval is deprecated, use flush_interval_ms instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        flush_interval_seconds = float(config.flush_interval)
+    else:
+        flush_interval_seconds = config.flush_interval_ms / 1000.0
+
     if not config.enabled:
         stop_event = threading.Event()
         stop_event.set()
@@ -80,6 +117,7 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
         project_id=config.project_id or "",
         environment=config.environment,
         sdk_version="0.1.0",
+        max_buckets=config.max_buckets,
     )
     transport = Transport(config)
     debug = config.debug
@@ -124,6 +162,17 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
                 file=sys.stderr,
             )
 
+        # If this event would push us past the bucket cap, flush the current
+        # window first so it's preserved, then ingest into a fresh window.
+        if aggregator.would_overflow(event):
+            try:
+                flush_and_send()
+            except Exception as err:
+                if config.on_error:
+                    config.on_error(err)
+                elif debug:
+                    print(f"[recost] flush error: {err}", file=sys.stderr)
+
         cost = match.cost_per_request_cents if match is not None else 0.0
         aggregator.ingest(event, cost)
 
@@ -143,7 +192,7 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
     stop_event = threading.Event()
 
     def _timer_loop() -> None:
-        while not stop_event.wait(timeout=config.flush_interval):
+        while not stop_event.wait(timeout=flush_interval_seconds):
             try:
                 flush_and_send()
             except Exception as err:
@@ -155,10 +204,23 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
     timer_thread = threading.Thread(target=_timer_loop, daemon=True)
     timer_thread.start()
 
+    def _final_flush() -> None:
+        # Errors during the final flush are logged / forwarded the same way
+        # as a normal tick — we never want dispose() to surface them.
+        try:
+            flush_and_send()
+        except Exception as err:
+            if config.on_error:
+                config.on_error(err)
+            elif debug:
+                print(f"[recost] flush error: {err}", file=sys.stderr)
+
     handle = RecostHandle(
         timer_stop=stop_event,
         timer_thread=timer_thread,
         transport=transport,
+        final_flush=_final_flush,
+        shutdown_flush_timeout_ms=config.shutdown_flush_timeout_ms,
     )
     _handle = handle
     return handle

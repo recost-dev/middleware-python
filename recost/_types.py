@@ -14,6 +14,21 @@ from typing import Callable, List, Literal, Optional
 
 
 # ---------------------------------------------------------------------------
+# FlushStatus
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FlushStatus:
+    """Outcome of the most recent flush, exposed on the recost handle."""
+
+    status: Literal["ok", "error"]
+    window_size: int
+    """Number of metric entries (unique triplets) in the flushed window."""
+    timestamp: int
+    """Milliseconds since epoch when the flush completed."""
+
+
+# ---------------------------------------------------------------------------
 # RawEvent
 # ---------------------------------------------------------------------------
 
@@ -127,8 +142,19 @@ class RecostConfig:
     api_key: Optional[str] = None
     project_id: Optional[str] = None
     environment: str = "development"
-    flush_interval: float = 30.0
+    flush_interval_ms: int = 30_000
+    """Milliseconds between automatic aggregator flushes. Defaults to 30000.
+    Matches the Node SDK's flushIntervalMs unit so the same numeric value
+    means the same thing across both SDKs."""
+    flush_interval: Optional[float] = None
+    """Deprecated. Legacy seconds-based flush interval. If set, takes
+    precedence over flush_interval_ms (with a DeprecationWarning) so
+    existing callers keep their previous behavior until they migrate."""
     max_batch_size: int = 100
+    max_buckets: int = 2000
+    """Maximum unique (provider, endpoint, method) triplets per window.
+    Crossing this threshold mid-window triggers an early flush so the API
+    does not reject the payload with a 422."""
     local_port: int = 9847
     debug: bool = False
     enabled: bool = True
@@ -136,6 +162,9 @@ class RecostConfig:
     exclude_patterns: List[str] = field(default_factory=list)
     base_url: str = "https://api.recost.dev"
     max_retries: int = 3
+    shutdown_flush_timeout_ms: int = 3_000
+    """How long dispose() waits for the final flush to complete before giving
+    up and closing the transport. Matches Node's shutdownFlushTimeoutMs."""
     on_error: Optional[Callable[[Exception], None]] = None
 
 
