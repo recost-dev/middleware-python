@@ -39,6 +39,20 @@ class TestInit:
         assert not is_installed()
 
 
+class TestLastFlushStatus:
+    def test_none_before_any_flush(self):
+        handle = init(RecostConfig())
+        try:
+            assert handle.last_flush_status is None
+        finally:
+            handle.dispose()
+
+    def test_none_when_disabled(self):
+        handle = init(RecostConfig(enabled=False))
+        assert handle.last_flush_status is None
+        handle.dispose()
+
+
 class TestExcludePatterns:
     def test_cloud_mode_excludes_base_url(self):
         # We can't easily test the filtering without making real requests,

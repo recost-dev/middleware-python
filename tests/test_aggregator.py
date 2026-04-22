@@ -6,7 +6,7 @@ Ported from the Node SDK's aggregator.test.ts.
 
 from datetime import datetime, timezone
 
-from recost._aggregator import Aggregator
+from recost._aggregator import Aggregator, MAX_BUCKETS
 from recost._types import RawEvent
 
 
@@ -337,3 +337,46 @@ class TestSizeAndBucketCount:
         assert len(summary.metrics) == 10
         for entry in summary.metrics:
             assert entry.request_count == 100
+
+
+# ---------------------------------------------------------------------------
+# Bucket overflow protection
+# ---------------------------------------------------------------------------
+
+class TestBucketOverflow:
+    def test_max_buckets_constant_is_2000(self):
+        assert MAX_BUCKETS == 2000
+
+    def test_would_overflow_false_below_cap(self):
+        agg = Aggregator(max_buckets=10)
+        for i in range(5):
+            agg.ingest(make_event(provider=f"p{i}", endpoint_category=f"ep{i}"))
+        assert not agg.would_overflow(make_event(provider="new", endpoint_category="new"))
+
+    def test_would_overflow_false_for_existing_key_at_cap(self):
+        agg = Aggregator(max_buckets=3)
+        agg.ingest(make_event(provider="a", endpoint_category="a"))
+        agg.ingest(make_event(provider="b", endpoint_category="b"))
+        agg.ingest(make_event(provider="c", endpoint_category="c"))
+        assert agg.bucket_count == 3
+        # Same triplet — no new bucket needed
+        assert not agg.would_overflow(make_event(provider="a", endpoint_category="a"))
+
+    def test_would_overflow_true_for_new_key_at_cap(self):
+        agg = Aggregator(max_buckets=3)
+        agg.ingest(make_event(provider="a", endpoint_category="a"))
+        agg.ingest(make_event(provider="b", endpoint_category="b"))
+        agg.ingest(make_event(provider="c", endpoint_category="c"))
+        assert agg.would_overflow(make_event(provider="d", endpoint_category="d"))
+
+    def test_max_buckets_property(self):
+        assert Aggregator(max_buckets=500).max_buckets == 500
+        assert Aggregator().max_buckets == MAX_BUCKETS
+
+    def test_default_cap_fires_at_2001st_triplet(self):
+        agg = Aggregator()
+        for i in range(2000):
+            agg.ingest(make_event(provider=f"p{i}", endpoint_category=f"ep{i}"))
+        assert agg.bucket_count == 2000
+        overflow = make_event(provider="p2000", endpoint_category="ep2000")
+        assert agg.would_overflow(overflow)

@@ -17,6 +17,18 @@ from ._types import MetricEntry, RawEvent, WindowSummary
 
 
 # ---------------------------------------------------------------------------
+# Bucket cap — matches the ingest API's 422 threshold
+# ---------------------------------------------------------------------------
+
+MAX_BUCKETS = 2000
+"""Maximum unique (provider, endpoint, method) triplets per window.
+
+Crossing this mid-window triggers an early flush so the current window is
+preserved instead of silently dropped when the API returns 422.
+"""
+
+
+# ---------------------------------------------------------------------------
 # Internal bucket structure
 # ---------------------------------------------------------------------------
 
@@ -60,10 +72,12 @@ class Aggregator:
         project_id: str = "",
         environment: str = "development",
         sdk_version: str = "0.0.0",
+        max_buckets: int = MAX_BUCKETS,
     ) -> None:
         self._project_id = project_id
         self._environment = environment
         self._sdk_version = sdk_version
+        self._max_buckets = max_buckets
         self._buckets: Dict[str, _Bucket] = {}
         self._window_start: Optional[str] = None
         self._size = 0
@@ -72,6 +86,19 @@ class Aggregator:
     # Public API
     # ---------------------------------------------------------------------------
 
+    @staticmethod
+    def _key_for(event: RawEvent) -> str:
+        provider = event.provider if event.provider is not None else "unknown"
+        endpoint = event.endpoint_category if event.endpoint_category is not None else event.path
+        return f"{provider}::{endpoint}::{event.method}"
+
+    def would_overflow(self, event: RawEvent) -> bool:
+        """True if ingesting ``event`` would allocate a new bucket while the
+        window is already at capacity. Callers should flush before ingesting."""
+        if len(self._buckets) < self._max_buckets:
+            return False
+        return self._key_for(event) not in self._buckets
+
     def ingest(self, event: RawEvent, cost_cents: float = 0.0) -> None:
         """Add one RawEvent to the current window."""
         if self._window_start is None:
@@ -79,7 +106,7 @@ class Aggregator:
 
         provider = event.provider if event.provider is not None else "unknown"
         endpoint = event.endpoint_category if event.endpoint_category is not None else event.path
-        key = f"{provider}::{endpoint}::{event.method}"
+        key = self._key_for(event)
 
         bucket = self._buckets.get(key)
         if bucket is None:
@@ -148,3 +175,8 @@ class Aggregator:
     def bucket_count(self) -> int:
         """Number of unique provider + endpoint + method groups."""
         return len(self._buckets)
+
+    @property
+    def max_buckets(self) -> int:
+        """Configured maximum buckets per window."""
+        return self._max_buckets
