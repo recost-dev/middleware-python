@@ -70,3 +70,27 @@ class TestReCostDeprecationAlias:
         from recost.frameworks.flask import ReCost, RecostExtension
 
         assert ReCost is RecostExtension or issubclass(ReCost, RecostExtension)
+
+
+def test_flask_extension_raises_clear_error_without_flask(monkeypatch) -> None:
+    """When `flask` is not installed, importing
+    `recost.frameworks.flask.RecostExtension` yields the stub class whose
+    constructor raises ImportError with an install hint.
+
+    We fake the missing import via sys.modules + importlib.reload, then
+    reload again with the real module after the test so subsequent tests
+    aren't poisoned.
+    """
+    import importlib
+    import sys
+    import pytest as _pytest
+
+    monkeypatch.setitem(sys.modules, "flask", None)
+    import recost.frameworks.flask as flask_mod
+    importlib.reload(flask_mod)
+    try:
+        with _pytest.raises(ImportError, match="pip install recost\\[flask\\]"):
+            flask_mod.RecostExtension()
+    finally:
+        monkeypatch.undo()
+        importlib.reload(flask_mod)
