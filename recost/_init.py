@@ -216,7 +216,17 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
         debug = config.debug
         max_batch_size = config.max_batch_size
 
-<<<<<<< HEAD
+        # Deferral cell — shared between transport callback and timer loop
+        # so a 429 response can push back the next flush.
+        _deferral_lock = threading.Lock()
+        _deferral_ms: List[int] = [0]
+
+        def _defer(ms: int) -> None:
+            with _deferral_lock:
+                _deferral_ms[0] = max(_deferral_ms[0], ms)
+
+        transport.set_defer_callback(_defer)
+
         # Build the set of URL substrings to exclude from tracking.
         exclude_patterns = list(config.exclude_patterns)
         if config.api_key:
@@ -224,25 +234,6 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
         else:
             exclude_patterns.append(f"127.0.0.1:{config.local_port}")
             exclude_patterns.append(f"localhost:{config.local_port}")
-=======
-    # Deferral cell — shared between transport callback and timer loop
-    _deferral_lock = threading.Lock()
-    _deferral_ms: List[int] = [0]  # mutable cell holding max-deferred ms
-
-    def _defer(ms: int) -> None:
-        with _deferral_lock:
-            _deferral_ms[0] = max(_deferral_ms[0], ms)
-
-    transport.set_defer_callback(_defer)
-
-    # Build the set of URL substrings to exclude from tracking.
-    exclude_patterns = list(config.exclude_patterns)
-    if config.api_key:
-        exclude_patterns.append(config.base_url.rstrip("/"))
-    else:
-        exclude_patterns.append(f"127.0.0.1:{config.local_port}")
-        exclude_patterns.append(f"localhost:{config.local_port}")
->>>>>>> 596744a (feat(transport): honor 429 Retry-After — emit RateLimitError, defer next flush (#18))
 
         # PID backstop cells — populated after `handle` is constructed below.
         # The on_event closure reads these on every event so a forked child
@@ -329,7 +320,14 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
         stop_event = threading.Event()
 
         def _timer_loop() -> None:
-            while not stop_event.wait(timeout=flush_interval_seconds):
+            while not stop_event.is_set():
+                # Consume any pending 429 deferral before the next sleep.
+                with _deferral_lock:
+                    extra_ms = _deferral_ms[0]
+                    _deferral_ms[0] = 0
+                wait = flush_interval_seconds + (extra_ms / 1000.0)
+                if stop_event.wait(timeout=wait):
+                    return
                 try:
                     flush_and_send()
                 except Exception as err:
@@ -374,7 +372,6 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
             handle._atexit_callback = handle.dispose
             atexit.register(handle._atexit_callback)
 
-<<<<<<< HEAD
         if hasattr(os, "register_at_fork"):
             def _after_fork() -> None:
                 try:
@@ -382,23 +379,5 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
                 except Exception:
                     pass  # Never let SDK errors crash a forked child
             os.register_at_fork(after_in_child=_after_fork)
-=======
-    def _timer_loop() -> None:
-        while not stop_event.is_set():
-            # Consume any pending deferral
-            with _deferral_lock:
-                extra_ms = _deferral_ms[0]
-                _deferral_ms[0] = 0
-            wait = config.flush_interval + (extra_ms / 1000.0)
-            if stop_event.wait(timeout=wait):
-                return
-            try:
-                flush_and_send()
-            except Exception as err:
-                if config.on_error:
-                    config.on_error(err)
-                elif debug:
-                    print(f"[recost] flush error: {err}", file=sys.stderr)
->>>>>>> 596744a (feat(transport): honor 429 Retry-After — emit RateLimitError, defer next flush (#18))
 
         return handle

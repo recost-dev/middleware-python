@@ -289,3 +289,50 @@ class TestInstallUninstallRace:
         assert urllib3.HTTPConnectionPool.urlopen is original_urlopen, (
             "concurrent install/uninstall left a recost wrapper in place"
         )
+
+
+# ---------------------------------------------------------------------------
+# aiohttp body sizing — json= and FormData
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_aiohttp_json_body_records_size(mock_http_server_200) -> None:  # type: ignore[no-untyped-def]
+    """When the user passes `json={...}` to aiohttp, request_bytes must reflect
+    the serialized JSON length, not 0."""
+    import aiohttp
+    import json as _json
+    from recost._interceptor import install, uninstall
+
+    events: list = []
+    install(events.append)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(mock_http_server_200.url, json={"x": "y"}) as resp:
+                await resp.read()
+        assert len(events) >= 1
+        ev = events[-1]
+        expected = len(_json.dumps({"x": "y"}))
+        assert ev.request_bytes == expected
+    finally:
+        uninstall()
+
+
+@pytest.mark.asyncio
+async def test_aiohttp_formdata_body_records_size(mock_http_server_200) -> None:  # type: ignore[no-untyped-def]
+    """aiohttp FormData payloads must report non-zero request_bytes."""
+    import aiohttp
+    from recost._interceptor import install, uninstall
+
+    events: list = []
+    install(events.append)
+    try:
+        form = aiohttp.FormData()
+        form.add_field("name", "value")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(mock_http_server_200.url, data=form) as resp:
+                await resp.read()
+        ev = events[-1]
+        assert ev.request_bytes > 0
+    finally:
+        uninstall()

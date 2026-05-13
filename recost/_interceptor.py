@@ -345,11 +345,32 @@ def _patch_aiohttp() -> None:
 
         try:
             data = kwargs.get("data")
-            if data is not None:
-                if isinstance(data, bytes):
+            json_body = kwargs.get("json")
+            if json_body is not None:
+                try:
+                    import json as _json
+                    request_bytes = len(_json.dumps(json_body))
+                except (TypeError, ValueError):
+                    request_bytes = 0
+            elif data is not None:
+                if isinstance(data, (bytes, bytearray)):
                     request_bytes = len(data)
                 elif isinstance(data, str):
                     request_bytes = len(data.encode("utf-8", errors="replace"))
+                elif hasattr(data, "_size"):
+                    size_attr = getattr(data, "_size", None)
+                    if isinstance(size_attr, int) and size_attr >= 0:
+                        request_bytes = size_attr
+                elif callable(data):
+                    # FormData and similar callables produce a payload when invoked
+                    try:
+                        payload = data()
+                        size_attr = getattr(payload, "_size", None)
+                        if isinstance(size_attr, int) and size_attr >= 0:
+                            request_bytes = size_attr
+                    except Exception:
+                        pass
+                # async iterables, BytesIO without known size — leave at 0
         except Exception:
             pass
 
