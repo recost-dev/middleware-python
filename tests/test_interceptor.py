@@ -289,3 +289,74 @@ class TestInstallUninstallRace:
         assert urllib3.HTTPConnectionPool.urlopen is original_urlopen, (
             "concurrent install/uninstall left a recost wrapper in place"
         )
+
+
+# ---------------------------------------------------------------------------
+# aiohttp body sizing — json= and FormData
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_aiohttp_json_body_records_size(mock_http_server_200) -> None:  # type: ignore[no-untyped-def]
+    """When the user passes `json={...}` to aiohttp, request_bytes must reflect
+    the serialized JSON length, not 0."""
+    import aiohttp
+    import json as _json
+    from recost._interceptor import install, uninstall
+
+    events: list = []
+    install(events.append)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(mock_http_server_200.url, json={"x": "y"}) as resp:
+                await resp.read()
+        assert len(events) >= 1
+        ev = events[-1]
+        expected = len(_json.dumps({"x": "y"}))
+        assert ev.request_bytes == expected
+    finally:
+        uninstall()
+
+
+@pytest.mark.asyncio
+async def test_aiohttp_formdata_body_records_size(mock_http_server_200) -> None:  # type: ignore[no-untyped-def]
+    """aiohttp FormData payloads must report non-zero request_bytes."""
+    import aiohttp
+    from recost._interceptor import install, uninstall
+
+    events: list = []
+    install(events.append)
+    try:
+        form = aiohttp.FormData()
+        form.add_field("name", "value")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(mock_http_server_200.url, data=form) as resp:
+                await resp.read()
+        ev = events[-1]
+        assert ev.request_bytes > 0
+    finally:
+        uninstall()
+
+
+def test_httpx_streaming_content_not_materialized(mock_http_server_200) -> None:  # type: ignore[no-untyped-def]
+    """Passing an async-iterable body to httpx must not be read by the interceptor.
+    The crucial assertion: request_bytes is 0 (we skipped sizing the stream) and
+    the SDK does not crash."""
+    import httpx
+    from recost._interceptor import install, uninstall
+
+    events: list = []
+    install(events.append)
+
+    def stream_body():
+        yield b"chunk1"
+        yield b"chunk2"
+
+    try:
+        req = httpx.Request("POST", mock_http_server_200.url, content=stream_body())
+        with httpx.Client() as client:
+            client.send(req)
+        ev = events[-1]
+        assert ev.request_bytes == 0
+    finally:
+        uninstall()

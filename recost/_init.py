@@ -173,6 +173,18 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
 
         config = config or RecostConfig()
 
+        if config.api_key is not None:
+            if not isinstance(config.api_key, str) or not config.api_key.startswith("rc-"):
+                prefix = (
+                    (config.api_key[:8] + "...")
+                    if isinstance(config.api_key, str) and config.api_key
+                    else type(config.api_key).__name__
+                )
+                raise ValueError(
+                    f"Recost: api_key must be a string beginning with 'rc-'. Got: {prefix!r}. "
+                    f"See https://recost.dev/docs/api-keys."
+                )
+
         # Resolve flush interval: prefer the new ms-based field, but if a caller
         # still passes the legacy seconds-based flush_interval, honor it with a
         # deprecation warning so existing code keeps working until they migrate.
@@ -203,6 +215,17 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
         transport = Transport(config)
         debug = config.debug
         max_batch_size = config.max_batch_size
+
+        # Deferral cell — shared between transport callback and timer loop
+        # so a 429 response can push back the next flush.
+        _deferral_lock = threading.Lock()
+        _deferral_ms: List[int] = [0]
+
+        def _defer(ms: int) -> None:
+            with _deferral_lock:
+                _deferral_ms[0] = max(_deferral_ms[0], ms)
+
+        transport.set_defer_callback(_defer)
 
         # Build the set of URL substrings to exclude from tracking.
         exclude_patterns = list(config.exclude_patterns)
@@ -297,7 +320,14 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
         stop_event = threading.Event()
 
         def _timer_loop() -> None:
-            while not stop_event.wait(timeout=flush_interval_seconds):
+            while not stop_event.is_set():
+                # Consume any pending 429 deferral before the next sleep.
+                with _deferral_lock:
+                    extra_ms = _deferral_ms[0]
+                    _deferral_ms[0] = 0
+                wait = flush_interval_seconds + (extra_ms / 1000.0)
+                if stop_event.wait(timeout=wait):
+                    return
                 try:
                     flush_and_send()
                 except Exception as err:

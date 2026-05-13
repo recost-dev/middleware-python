@@ -60,7 +60,7 @@ class TestExcludePatterns:
         # We can't easily test the filtering without making real requests,
         # but we can verify init() doesn't crash with these settings
         handle = init(RecostConfig(
-            api_key="test",
+            api_key="rc-test-key",
             project_id="proj",
             base_url="https://api.recost.dev",
             exclude_patterns=["/favicon.ico"],
@@ -278,7 +278,8 @@ class TestAtexitFlush:
                 flush_interval_ms=600_000,
                 # Disable transport network IO via a fake api_key so cloud
                 # mode hits our patched send (we don't care if HTTP fails).
-                api_key="test",
+                # Must start with 'rc-' to pass api_key format validation.
+                api_key="rc-test",
                 project_id="test",
                 base_url="http://127.0.0.1:1",
             ))
@@ -353,3 +354,30 @@ def test_reinit_after_fork_resets_pid_and_threads() -> None:
         assert handle.pid == os.getpid()
     finally:
         handle.dispose()
+
+
+def test_init_rejects_string_undefined_as_api_key() -> None:
+    """A literal 'undefined' (common config-file shape) must raise ValueError."""
+    import pytest
+    from recost import init, RecostConfig
+    with pytest.raises(ValueError, match="must be a string beginning with 'rc-'"):
+        init(RecostConfig(api_key="undefined"))
+
+
+def test_init_rejects_non_string_api_key() -> None:
+    import pytest
+    from recost import init, RecostConfig
+    with pytest.raises(ValueError, match="must be a string beginning with 'rc-'"):
+        init(RecostConfig(api_key=123))  # type: ignore[arg-type]
+
+
+def test_init_accepts_valid_rc_prefix() -> None:
+    from recost import init, RecostConfig
+    handle = init(RecostConfig(api_key="rc-abc123", project_id="p_1"))
+    handle.dispose()
+
+
+def test_init_accepts_none_api_key() -> None:
+    from recost import init, RecostConfig
+    handle = init(RecostConfig(api_key=None))
+    handle.dispose()

@@ -460,3 +460,160 @@ class TestDisposeDuringConnect:
             )
         finally:
             server.close()
+
+
+# ---------------------------------------------------------------------------
+# _CloudResult / _post_cloud tests
+# ---------------------------------------------------------------------------
+
+
+def test_post_cloud_returns_status_on_2xx(mock_http_server_200) -> None:  # type: ignore[no-untyped-def]
+    from recost._transport import _post_cloud
+    result = _post_cloud(
+        url=mock_http_server_200.url,
+        body='{"ping": 1}',
+        api_key="rc-test",
+        max_retries=0,
+    )
+    assert result.status == 200
+    assert result.retry_after_ms is None
+    assert result.error is None
+
+
+def test_post_cloud_returns_401_status_without_raising(mock_http_server_401) -> None:  # type: ignore[no-untyped-def]
+    from recost._transport import _post_cloud
+    result = _post_cloud(
+        url=mock_http_server_401.url,
+        body='{"ping": 1}',
+        api_key="rc-bad",
+        max_retries=0,
+    )
+    assert result.status == 401
+    assert result.retry_after_ms is None
+
+
+def test_post_cloud_parses_retry_after_seconds_on_429(mock_http_server_429_retry_after_2) -> None:  # type: ignore[no-untyped-def]
+    from recost._transport import _post_cloud
+    result = _post_cloud(
+        url=mock_http_server_429_retry_after_2.url,
+        body='{"ping": 1}',
+        api_key="rc-ok",
+        max_retries=0,
+    )
+    assert result.status == 429
+    assert result.retry_after_ms == 2000
+
+
+def test_first_401_emits_recost_auth_error(mock_http_server_401) -> None:  # type: ignore[no-untyped-def]
+    from recost import RecostAuthError, RecostConfig
+    from recost._transport import Transport
+    from recost._types import WindowSummary
+
+    errors: list = []
+    transport = Transport(RecostConfig(
+        api_key="rc-bad",
+        project_id="p_1",
+        base_url=mock_http_server_401.url.rstrip("/"),
+        on_error=errors.append,
+        max_retries=0,
+    ))
+    summary = WindowSummary(
+        project_id="p_1",
+        environment="test",
+        sdk_language="python",
+        sdk_version="0.1.0",
+        window_start="2026-05-13T00:00:00Z",
+        window_end="2026-05-13T00:00:30Z",
+        metrics=[],
+    )
+    transport.send(summary)
+    assert len(errors) == 1
+    assert isinstance(errors[0], RecostAuthError)
+    assert errors[0].status == 401
+    assert errors[0].consecutive_failures == 1
+
+
+def test_fifth_consecutive_401_emits_fatal_and_suspends(mock_http_server_401) -> None:  # type: ignore[no-untyped-def]
+    from recost import RecostFatalAuthError, RecostConfig
+    from recost._transport import Transport
+    from recost._types import WindowSummary
+
+    errors: list = []
+    transport = Transport(RecostConfig(
+        api_key="rc-bad",
+        project_id="p_1",
+        base_url=mock_http_server_401.url.rstrip("/"),
+        on_error=errors.append,
+        max_retries=0,
+    ))
+    summary = WindowSummary(
+        project_id="p_1",
+        environment="test",
+        sdk_language="python",
+        sdk_version="0.1.0",
+        window_start="2026-05-13T00:00:00Z",
+        window_end="2026-05-13T00:00:30Z",
+        metrics=[],
+    )
+    for _ in range(5):
+        transport.send(summary)
+    fatal = [e for e in errors if isinstance(e, RecostFatalAuthError)]
+    assert len(fatal) == 1
+    errors_before_sixth = list(errors)
+    transport.send(summary)
+    assert errors == errors_before_sixth  # nothing new appended
+
+
+def test_429_emits_rate_limit_error_and_invokes_defer(mock_http_server_429_retry_after_2) -> None:  # type: ignore[no-untyped-def]
+    from recost import RecostRateLimitError, RecostConfig
+    from recost._transport import Transport
+    from recost._types import WindowSummary
+
+    errors: list = []
+    defers: list = []
+    transport = Transport(RecostConfig(
+        api_key="rc-ok",
+        project_id="p_1",
+        base_url=mock_http_server_429_retry_after_2.url.rstrip("/"),
+        on_error=errors.append,
+        max_retries=0,
+    ))
+    transport.set_defer_callback(defers.append)
+    summary = WindowSummary(
+        project_id="p_1",
+        environment="test",
+        sdk_language="python",
+        sdk_version="0.1.0",
+        window_start="2026-05-13T00:00:00Z",
+        window_end="2026-05-13T00:00:30Z",
+        metrics=[],
+    )
+    transport.send(summary)
+    assert len(errors) == 1
+    assert isinstance(errors[0], RecostRateLimitError)
+    assert errors[0].retry_after_ms == 2000
+    assert defers == [2000]
+
+
+def test_429_does_not_increment_auth_counter(mock_http_server_429_retry_after_2) -> None:  # type: ignore[no-untyped-def]
+    from recost import RecostConfig
+    from recost._transport import Transport
+    from recost._types import WindowSummary
+
+    transport = Transport(RecostConfig(
+        api_key="rc-ok",
+        project_id="p_1",
+        base_url=mock_http_server_429_retry_after_2.url.rstrip("/"),
+        max_retries=0,
+    ))
+    summary = WindowSummary(
+        project_id="p_1",
+        environment="test",
+        sdk_language="python",
+        sdk_version="0.1.0",
+        window_start="2026-05-13T00:00:00Z",
+        window_end="2026-05-13T00:00:30Z",
+        metrics=[],
+    )
+    transport.send(summary)
+    assert transport._consecutive_auth_failures == 0
