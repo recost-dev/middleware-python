@@ -317,4 +317,12 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
             handle._atexit_callback = handle.dispose
             atexit.register(handle._atexit_callback)
 
+        if hasattr(os, "register_at_fork"):
+            def _after_fork() -> None:
+                try:
+                    handle.reinit_after_fork()
+                except Exception:
+                    pass  # Never let SDK errors crash a forked child
+            os.register_at_fork(after_in_child=_after_fork)
+
         return handle
