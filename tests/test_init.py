@@ -325,3 +325,14 @@ class TestAtexitFlush:
         assert content.startswith("flushed:"), (
             f"marker content unexpected: {content!r}"
         )
+
+
+def test_handle_records_pid() -> None:
+    """The handle records the PID at init time."""
+    import os
+    from recost import init, RecostConfig
+    handle = init(RecostConfig(enabled=True, api_key=None))
+    try:
+        assert handle.pid == os.getpid()
+    finally:
+        handle.dispose()

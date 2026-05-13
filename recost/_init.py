@@ -6,6 +6,7 @@ This is the primary entry point for SDK users.
 from __future__ import annotations
 
 import atexit
+import os
 import sys
 import threading
 import warnings
@@ -35,6 +36,7 @@ class RecostHandle:
         self._final_flush = final_flush
         self._shutdown_flush_timeout_ms = shutdown_flush_timeout_ms
         self._disposed = False
+        self.pid: int = os.getpid()
         # Set by init() when auto_shutdown_handlers=True. Cleared in
         # dispose() so we don't keep a dangling atexit registration after
         # explicit teardown — without this, a long-lived process that
