@@ -13,7 +13,7 @@ import contextvars
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
 from ._types import RawEvent
@@ -43,6 +43,9 @@ _original_httpx_send = None
 _original_httpx_async_send = None
 _original_aiohttp_request = None
 
+# Sentinel for urllib3 timeout default — resolved lazily to avoid import-time side-effects
+_UNSET: Any = object()
+
 # Double-count prevention
 _in_interceptor: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_in_interceptor", default=False
@@ -68,7 +71,7 @@ def _build_event(
     url: str,
     method: str,
     status_code: int,
-    latency_ms: int,
+    latency_ms: float,
     request_bytes: int,
     response_bytes: int,
 ) -> RawEvent:
@@ -89,7 +92,7 @@ def _build_event(
         host=host,
         path=path,
         status_code=status_code,
-        latency_ms=round(latency_ms),
+        latency_ms=latency_ms,
         request_bytes=request_bytes,
         response_bytes=response_bytes,
         provider=None,
@@ -106,13 +109,15 @@ def _build_event(
 def _patch_urllib3() -> None:
     global _original_urllib3_urlopen
     try:
-        import urllib3  # type: ignore[import-untyped]
+        import urllib3
     except ImportError:
         return
 
-    _original_urllib3_urlopen = urllib3.HTTPConnectionPool.urlopen  # type: ignore[attr-defined]
+    _original_urllib3_urlopen = urllib3.HTTPConnectionPool.urlopen
 
-    def _patched_urlopen(self, method, url, body=None, headers=None, retries=None, redirect=True, assert_same_host=True, timeout=urllib3.util.Timeout.DEFAULT_TIMEOUT, pool_connections=None, pool_maxsize=None, **response_kw):  # type: ignore[no-untyped-def]
+    def _patched_urlopen(self: Any, method: str, url: str, body: Any = None, headers: Any = None, retries: Any = None, redirect: bool = True, assert_same_host: bool = True, timeout: Any = _UNSET, **response_kw: Any) -> Any:
+        if timeout is _UNSET:
+            timeout = urllib3.util.Timeout.DEFAULT_TIMEOUT
         if _in_interceptor.get(False):
             return _original_urllib3_urlopen(self, method, url, body=body, headers=headers, retries=retries, redirect=redirect, assert_same_host=assert_same_host, timeout=timeout, **response_kw)
 
@@ -162,7 +167,7 @@ def _patch_urllib3() -> None:
                 pass
             raise exc
 
-    urllib3.HTTPConnectionPool.urlopen = _patched_urlopen  # type: ignore[attr-defined]
+    urllib3.HTTPConnectionPool.urlopen = _patched_urlopen  # type: ignore[method-assign,assignment]
 
 
 def _unpatch_urllib3() -> None:
@@ -170,8 +175,8 @@ def _unpatch_urllib3() -> None:
     if _original_urllib3_urlopen is None:
         return
     try:
-        import urllib3  # type: ignore[import-untyped]
-        urllib3.HTTPConnectionPool.urlopen = _original_urllib3_urlopen  # type: ignore[attr-defined]
+        import urllib3
+        urllib3.HTTPConnectionPool.urlopen = _original_urllib3_urlopen  # type: ignore[method-assign]
     except ImportError:
         pass
     _original_urllib3_urlopen = None
@@ -192,7 +197,7 @@ def _patch_httpx() -> None:
     # Sync client
     _original_httpx_send = httpx.Client.send
 
-    def _patched_send(self, request, **kwargs):  # type: ignore[no-untyped-def]
+    def _patched_send(self: Any, request: Any, **kwargs: Any) -> Any:
         if _in_interceptor.get(False):
             return _original_httpx_send(self, request, **kwargs)
 
@@ -234,12 +239,12 @@ def _patch_httpx() -> None:
                 pass
             raise exc
 
-    httpx.Client.send = _patched_send  # type: ignore[assignment]
+    httpx.Client.send = _patched_send  # type: ignore[method-assign]
 
     # Async client
     _original_httpx_async_send = httpx.AsyncClient.send
 
-    async def _patched_async_send(self, request, **kwargs):  # type: ignore[no-untyped-def]
+    async def _patched_async_send(self: Any, request: Any, **kwargs: Any) -> Any:
         if _in_interceptor.get(False):
             return await _original_httpx_async_send(self, request, **kwargs)
 
@@ -281,7 +286,7 @@ def _patch_httpx() -> None:
                 pass
             raise exc
 
-    httpx.AsyncClient.send = _patched_async_send  # type: ignore[assignment]
+    httpx.AsyncClient.send = _patched_async_send  # type: ignore[method-assign]
 
 
 def _unpatch_httpx() -> None:
@@ -291,10 +296,10 @@ def _unpatch_httpx() -> None:
     except ImportError:
         return
     if _original_httpx_send is not None:
-        httpx.Client.send = _original_httpx_send  # type: ignore[assignment]
+        httpx.Client.send = _original_httpx_send  # type: ignore[method-assign]
         _original_httpx_send = None
     if _original_httpx_async_send is not None:
-        httpx.AsyncClient.send = _original_httpx_async_send  # type: ignore[assignment]
+        httpx.AsyncClient.send = _original_httpx_async_send  # type: ignore[method-assign]
         _original_httpx_async_send = None
 
 
@@ -306,13 +311,13 @@ def _unpatch_httpx() -> None:
 def _patch_aiohttp() -> None:
     global _original_aiohttp_request
     try:
-        import aiohttp  # type: ignore[import-untyped]
+        import aiohttp
     except ImportError:
         return
 
-    _original_aiohttp_request = aiohttp.ClientSession._request  # type: ignore[attr-defined]
+    _original_aiohttp_request = aiohttp.ClientSession._request
 
-    async def _patched_request(self, method, url, **kwargs):  # type: ignore[no-untyped-def]
+    async def _patched_request(self: Any, method: str, url: Any, **kwargs: Any) -> Any:
         if _in_interceptor.get(False):
             return await _original_aiohttp_request(self, method, url, **kwargs)
 
@@ -356,7 +361,7 @@ def _patch_aiohttp() -> None:
                 pass
             raise exc
 
-    aiohttp.ClientSession._request = _patched_request  # type: ignore[attr-defined]
+    aiohttp.ClientSession._request = _patched_request  # type: ignore[method-assign,assignment]
 
 
 def _unpatch_aiohttp() -> None:
@@ -364,8 +369,8 @@ def _unpatch_aiohttp() -> None:
     if _original_aiohttp_request is None:
         return
     try:
-        import aiohttp  # type: ignore[import-untyped]
-        aiohttp.ClientSession._request = _original_aiohttp_request  # type: ignore[attr-defined]
+        import aiohttp
+        aiohttp.ClientSession._request = _original_aiohttp_request  # type: ignore[method-assign]
     except ImportError:
         pass
     _original_aiohttp_request = None
