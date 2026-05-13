@@ -10,7 +10,7 @@ import os
 import sys
 import threading
 import warnings
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from ._aggregator import Aggregator
 from ._interceptor import install, uninstall
@@ -212,6 +212,13 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
             exclude_patterns.append(f"127.0.0.1:{config.local_port}")
             exclude_patterns.append(f"localhost:{config.local_port}")
 
+        # PID backstop cells — populated after `handle` is constructed below.
+        # The on_event closure reads these on every event so a forked child
+        # whose register_at_fork hook didn't fire (uwsgi lazy-fork, etc.)
+        # still self-repairs on the first intercepted call.
+        _handle_ref: List[Optional["RecostHandle"]] = [None]
+        _pid_warned: List[bool] = [False]
+
         def flush_and_send() -> None:
             summary = aggregator.flush()
             if summary is None:
@@ -225,6 +232,23 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
             transport.send(summary)
 
         def on_event(event: RawEvent) -> None:
+            # PID backstop: if the at-fork hook didn't fire on this platform,
+            # repair the handle lazily on the first event after the fork.
+            h = _handle_ref[0]
+            if h is not None and h.pid != os.getpid():
+                try:
+                    h.reinit_after_fork()
+                    if not _pid_warned[0]:
+                        _pid_warned[0] = True
+                        if config.on_error is not None:
+                            from ._types import RecostError
+                            config.on_error(RecostError(
+                                f"recost: detected fork without register_at_fork hook; "
+                                f"reinitialized in pid={os.getpid()}"
+                            ))
+                except Exception:
+                    return  # never let SDK errors break user code
+
             # Drop excluded URLs
             for pattern in exclude_patterns:
                 if pattern in event.url or pattern in event.host:
@@ -306,6 +330,7 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
             rebuild=rebuild,
         )
         _handle = handle
+        _handle_ref[0] = handle
 
         # Register an atexit hook so short-lived processes (cron, Lambda,
         # one-shot CLI scripts, SIGTERM'd containers) flush their last
