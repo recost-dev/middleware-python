@@ -182,7 +182,8 @@ Unrecognized hosts still appear in telemetry, grouped under `"unknown"`.
 - Request timestamp, method, URL (query params stripped), host, path
 - Response status code
 - Round-trip latency (ms)
-- Request and response body size (bytes)
+- Request body size (bytes) — measured for JSON, form, bytes, and string payloads. Streaming uploads (async iterators, generators) are reported as 0 to avoid buffering large bodies.
+- Response body size (bytes) — derived from the `Content-Length` response header. HTTP chunked and SSE streams do not set this header and will report 0.
 - Matched provider, endpoint category, and estimated cost
 
 **Never captured:**
