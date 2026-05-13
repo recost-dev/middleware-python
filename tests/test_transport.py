@@ -652,3 +652,62 @@ class TestSelfInstrumentation:
             )
         finally:
             uninstall()
+
+
+# ---------------------------------------------------------------------------
+# 5xx retry — exponential backoff, max_retries respected (#9)
+# ---------------------------------------------------------------------------
+
+
+class Test5xxRetry:
+    """Counterpart to test_no_retry_on_4xx (line 121). 5xx is retriable;
+    the loop in _post_cloud sleeps min(1.0 * 2**attempt, 10.0) between
+    attempts and stops after max_retries + 1 total tries."""
+
+    def test_5xx_retries_exactly_max_retries_attempts(self, cloud_server, monkeypatch):
+        from recost._transport import Transport
+        from recost._types import RecostConfig
+        # Eliminate the real backoff so the test runs fast
+        monkeypatch.setattr("recost._transport.time.sleep", lambda _s: None)
+        base_url, _ = cloud_server
+        _CloudHandler.response_code = 500
+        config = RecostConfig(
+            api_key="rc-test",
+            project_id="proj-123",
+            base_url=base_url,
+            max_retries=2,
+        )
+        transport = Transport(config)
+        transport.send(_make_summary())
+        transport.dispose()
+        # 1 initial attempt + 2 retries = 3 total
+        assert len(_CloudHandler.received) == 3, (
+            f"expected 3 total cloud POSTs (1 initial + 2 retries), got "
+            f"{len(_CloudHandler.received)}"
+        )
+
+    def test_5xx_retry_uses_exponential_backoff(self, cloud_server, monkeypatch):
+        from recost._transport import Transport
+        from recost._types import RecostConfig
+        sleeps: list[float] = []
+        monkeypatch.setattr(
+            "recost._transport.time.sleep",
+            lambda s: sleeps.append(s),
+        )
+        base_url, _ = cloud_server
+        _CloudHandler.response_code = 500
+        config = RecostConfig(
+            api_key="rc-test",
+            project_id="proj-123",
+            base_url=base_url,
+            max_retries=3,
+        )
+        transport = Transport(config)
+        transport.send(_make_summary())
+        transport.dispose()
+        # _post_cloud sleeps between attempts when attempt < max_retries.
+        # For max_retries=3 → attempts 0,1,2 each sleep; attempt 3 doesn't.
+        # Shape: min(1.0 * 2**attempt, 10.0) → [1.0, 2.0, 4.0].
+        assert sleeps == pytest.approx([1.0, 2.0, 4.0]), (
+            f"expected exponential backoff [1.0, 2.0, 4.0], got {sleeps}"
+        )
