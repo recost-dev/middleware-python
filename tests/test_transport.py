@@ -562,3 +562,58 @@ def test_fifth_consecutive_401_emits_fatal_and_suspends(mock_http_server_401) ->
     errors_before_sixth = list(errors)
     transport.send(summary)
     assert errors == errors_before_sixth  # nothing new appended
+
+
+def test_429_emits_rate_limit_error_and_invokes_defer(mock_http_server_429_retry_after_2) -> None:  # type: ignore[no-untyped-def]
+    from recost import RecostRateLimitError, RecostConfig
+    from recost._transport import Transport
+    from recost._types import WindowSummary
+
+    errors: list = []
+    defers: list = []
+    transport = Transport(RecostConfig(
+        api_key="rc-ok",
+        project_id="p_1",
+        base_url=mock_http_server_429_retry_after_2.url.rstrip("/"),
+        on_error=errors.append,
+        max_retries=0,
+    ))
+    transport.set_defer_callback(defers.append)
+    summary = WindowSummary(
+        project_id="p_1",
+        environment="test",
+        sdk_language="python",
+        sdk_version="0.1.0",
+        window_start="2026-05-13T00:00:00Z",
+        window_end="2026-05-13T00:00:30Z",
+        metrics=[],
+    )
+    transport.send(summary)
+    assert len(errors) == 1
+    assert isinstance(errors[0], RecostRateLimitError)
+    assert errors[0].retry_after_ms == 2000
+    assert defers == [2000]
+
+
+def test_429_does_not_increment_auth_counter(mock_http_server_429_retry_after_2) -> None:  # type: ignore[no-untyped-def]
+    from recost import RecostConfig
+    from recost._transport import Transport
+    from recost._types import WindowSummary
+
+    transport = Transport(RecostConfig(
+        api_key="rc-ok",
+        project_id="p_1",
+        base_url=mock_http_server_429_retry_after_2.url.rstrip("/"),
+        max_retries=0,
+    ))
+    summary = WindowSummary(
+        project_id="p_1",
+        environment="test",
+        sdk_language="python",
+        sdk_version="0.1.0",
+        window_start="2026-05-13T00:00:00Z",
+        window_end="2026-05-13T00:00:30Z",
+        metrics=[],
+    )
+    transport.send(summary)
+    assert transport._consecutive_auth_failures == 0

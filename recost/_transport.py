@@ -20,7 +20,7 @@ import urllib.request
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Optional
+from typing import Callable, Optional
 
 from ._types import FlushStatus, RecostConfig, TransportMode, WindowSummary
 
@@ -299,6 +299,7 @@ class Transport:
         self._consecutive_auth_failures: int = 0
         self._suspended: bool = False
         self._auth_warned_stderr: bool = False
+        self._defer_callback: Optional[Callable[[int], None]] = None
 
         self._local: Optional[_LocalTransport] = None
         if self.mode == "local":
@@ -312,6 +313,10 @@ class Transport:
     def last_flush_status(self) -> Optional[FlushStatus]:
         """Outcome of the most recent flush, or None if none has completed yet."""
         return self._last_flush_status
+
+    def set_defer_callback(self, cb: Callable[[int], None]) -> None:
+        """Called with retry_after_ms when the API returns 429."""
+        self._defer_callback = cb
 
     def send(self, summary: WindowSummary) -> None:
         """Send a WindowSummary. Never raises — errors forwarded to on_error.
@@ -407,12 +412,12 @@ class Transport:
             self._on_error(Exception(msg))
 
     def _handle_cloud_result(self, result: _CloudResult, window_size: int) -> bool:
-        """Handle typed cloud responses (401 escalation, 429 deferral landing later).
+        """Handle typed cloud responses (401 escalation, 429 deferral).
 
         Returns True if the response was fully handled (caller should skip the
         generic rejection path); False to fall through to the default handler.
         """
-        from ._types import RecostAuthError, RecostFatalAuthError
+        from ._types import RecostAuthError, RecostFatalAuthError, RecostRateLimitError
 
         if result.status == 401:
             self._consecutive_auth_failures += 1
@@ -438,8 +443,18 @@ class Transport:
                     ))
             return True
 
-        # 429 and other terminal cases — 429 lands in the next commit on top
-        # of this PR. For now any non-401 falls through to _report_rejection.
+        if result.status == 429:
+            retry_after_ms = result.retry_after_ms or 60_000
+            if self._on_error is not None:
+                self._on_error(RecostRateLimitError(
+                    retry_after_ms=retry_after_ms,
+                    endpoint=f"/projects/{self._project_id}/telemetry",
+                ))
+            if self._defer_callback is not None:
+                self._defer_callback(retry_after_ms)
+            return True
+
+        # Any other non-2xx falls through to the generic _report_rejection path.
         return False
 
     def dispose(self) -> None:
