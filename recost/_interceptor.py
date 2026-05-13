@@ -157,7 +157,7 @@ def _patch_urllib3() -> None:
                 pass
 
             return response
-        except Exception as exc:
+        except Exception:
             _in_interceptor.reset(token)
             try:
                 latency_ms = (time.perf_counter() - start) * 1000
@@ -228,7 +228,7 @@ def _patch_httpx() -> None:
                 pass
 
             return response
-        except Exception as exc:
+        except Exception:
             _in_interceptor.reset(token)
             try:
                 latency_ms = (time.perf_counter() - start) * 1000
@@ -275,7 +275,7 @@ def _patch_httpx() -> None:
                 pass
 
             return response
-        except Exception as exc:
+        except Exception:
             _in_interceptor.reset(token)
             try:
                 latency_ms = (time.perf_counter() - start) * 1000
@@ -351,7 +351,7 @@ def _patch_aiohttp() -> None:
                 pass
 
             return response
-        except Exception as exc:
+        except Exception:
             _in_interceptor.reset(token)
             try:
                 latency_ms = (time.perf_counter() - start) * 1000
