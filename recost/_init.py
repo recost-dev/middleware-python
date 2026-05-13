@@ -173,6 +173,18 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
 
         config = config or RecostConfig()
 
+        if config.api_key is not None:
+            if not isinstance(config.api_key, str) or not config.api_key.startswith("rc-"):
+                prefix = (
+                    (config.api_key[:8] + "...")
+                    if isinstance(config.api_key, str) and config.api_key
+                    else type(config.api_key).__name__
+                )
+                raise ValueError(
+                    f"Recost: api_key must be a string beginning with 'rc-'. Got: {prefix!r}. "
+                    f"See https://recost.dev/docs/api-keys."
+                )
+
         # Resolve flush interval: prefer the new ms-based field, but if a caller
         # still passes the legacy seconds-based flush_interval, honor it with a
         # deprecation warning so existing code keeps working until they migrate.
