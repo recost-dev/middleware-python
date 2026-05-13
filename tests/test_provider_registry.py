@@ -11,7 +11,7 @@ from recost import ProviderRegistry, BUILTIN_PROVIDERS
 
 
 class TestBuiltinProviders:
-    """Tests for all 21 built-in provider rules."""
+    """Tests for all 34 built-in provider rules (14 unique providers)."""
 
     def setup_method(self):
         self.registry = ProviderRegistry()
@@ -370,3 +370,18 @@ class TestBuiltinProvidersArray:
 
 # Need to import ProviderDef for custom provider tests
 from recost import ProviderDef  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Built-in provider count — pins the published claim
+# ---------------------------------------------------------------------------
+
+def test_builtin_providers_count_is_pinned():
+    """If you add or remove a built-in provider rule, update this assertion
+    AND update the provider-count claims in README.md and CLAUDE.md."""
+    from recost._provider_registry import BUILTIN_PROVIDERS
+
+    assert len(BUILTIN_PROVIDERS) == 34, (
+        f"BUILTIN_PROVIDERS has {len(BUILTIN_PROVIDERS)} rules; "
+        f"docs claim 34. Update docs and this assertion together."
+    )
