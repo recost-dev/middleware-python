@@ -165,6 +165,13 @@ class RecostConfig:
     shutdown_flush_timeout_ms: int = 3_000
     """How long dispose() waits for the final flush to complete before giving
     up and closing the transport. Matches Node's shutdownFlushTimeoutMs."""
+    auto_shutdown_handlers: bool = True
+    """When True (default), init() registers an atexit handler that runs the
+    final flush at normal process termination. Currently only atexit is
+    wired — a future change may add a SIGTERM handler under the same flag.
+    Set to False if the host application installs its own lifecycle
+    management and does not want recost touching atexit (e.g. some test
+    runners, embedded scripts)."""
     on_error: Optional[Callable[[Exception], None]] = None
 
 
