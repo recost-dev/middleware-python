@@ -617,3 +617,44 @@ def test_429_does_not_increment_auth_counter(mock_http_server_429_retry_after_2)
     )
     transport.send(summary)
     assert transport._consecutive_auth_failures == 0
+
+
+# ---------------------------------------------------------------------------
+# Graceful degradation — websockets missing (#9)
+# ---------------------------------------------------------------------------
+
+
+def test_local_transport_no_op_without_websockets(monkeypatch) -> None:
+    """When the optional `websockets` dependency is not installed, the
+    `_LocalTransport` constructor must:
+      - construct without raising,
+      - log a warning telling the user how to install it,
+      - mark `_has_websockets = False` so send()/dispose() short-circuit.
+
+    We fake the missing import via sys.modules + importlib.reload, then
+    reload again with the real module after the test so subsequent tests
+    in the run see the truth.
+    """
+    import importlib
+    import sys
+    import time as _time
+
+    monkeypatch.setitem(sys.modules, "websockets", None)
+    import recost._transport as transport_mod
+    importlib.reload(transport_mod)
+    try:
+        lt = transport_mod._LocalTransport(port=12345)
+        assert lt._has_websockets is False, (
+            "expected _has_websockets=False when websockets is unavailable"
+        )
+        # send() and dispose() must not raise — they are no-ops
+        lt.send("payload")
+        start = _time.monotonic()
+        lt.dispose()
+        assert _time.monotonic() - start < 0.5, (
+            "dispose() blocked unexpectedly when websockets was missing"
+        )
+    finally:
+        # Restore the real module so subsequent tests aren't poisoned
+        monkeypatch.undo()
+        importlib.reload(transport_mod)
