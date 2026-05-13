@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextvars
 import threading
 import time
+from contextvars import Token
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
@@ -46,10 +47,26 @@ _original_aiohttp_request = None
 # Sentinel for urllib3 timeout default — resolved lazily to avoid import-time side-effects
 _UNSET: Any = object()
 
-# Double-count prevention
-_in_interceptor: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "_in_interceptor", default=False
+# Double-count prevention — covers both async-task hops and OS-thread hops.
+_in_interceptor_task: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_in_interceptor_task", default=False
 )
+_in_interceptor_thread = threading.local()
+
+
+def _is_in_interceptor() -> bool:
+    return _in_interceptor_task.get() or bool(getattr(_in_interceptor_thread, "flag", False))
+
+
+def _enter_interceptor() -> Token[bool]:
+    token = _in_interceptor_task.set(True)
+    _in_interceptor_thread.flag = True
+    return token
+
+
+def _exit_interceptor(token: Token[bool]) -> None:
+    _in_interceptor_task.reset(token)
+    _in_interceptor_thread.flag = False
 
 # ---------------------------------------------------------------------------
 # URL helpers
@@ -118,10 +135,10 @@ def _patch_urllib3() -> None:
     def _patched_urlopen(self: Any, method: str, url: str, body: Any = None, headers: Any = None, retries: Any = None, redirect: bool = True, assert_same_host: bool = True, timeout: Any = _UNSET, **response_kw: Any) -> Any:
         if timeout is _UNSET:
             timeout = urllib3.util.Timeout.DEFAULT_TIMEOUT
-        if _in_interceptor.get(False):
+        if _is_in_interceptor():
             return _original_urllib3_urlopen(self, method, url, body=body, headers=headers, retries=retries, redirect=redirect, assert_same_host=assert_same_host, timeout=timeout, **response_kw)
 
-        token = _in_interceptor.set(True)
+        token = _enter_interceptor()
         start = time.perf_counter()
         full_url = ""
         request_bytes = 0
@@ -144,7 +161,7 @@ def _patch_urllib3() -> None:
 
         try:
             response = _original_urllib3_urlopen(self, method, url, body=body, headers=headers, retries=retries, redirect=redirect, assert_same_host=assert_same_host, timeout=timeout, **response_kw)
-            _in_interceptor.reset(token)
+            _exit_interceptor(token)
 
             try:
                 latency_ms = (time.perf_counter() - start) * 1000
@@ -158,7 +175,7 @@ def _patch_urllib3() -> None:
 
             return response
         except Exception:
-            _in_interceptor.reset(token)
+            _exit_interceptor(token)
             try:
                 latency_ms = (time.perf_counter() - start) * 1000
                 if _callback is not None:
@@ -198,10 +215,10 @@ def _patch_httpx() -> None:
     _original_httpx_send = httpx.Client.send
 
     def _patched_send(self: Any, request: Any, **kwargs: Any) -> Any:
-        if _in_interceptor.get(False):
+        if _is_in_interceptor():
             return _original_httpx_send(self, request, **kwargs)
 
-        token = _in_interceptor.set(True)
+        token = _enter_interceptor()
         start = time.perf_counter()
         full_url = str(request.url) if hasattr(request, "url") else ""
         request_bytes = 0
@@ -214,7 +231,7 @@ def _patch_httpx() -> None:
 
         try:
             response = _original_httpx_send(self, request, **kwargs)
-            _in_interceptor.reset(token)
+            _exit_interceptor(token)
 
             try:
                 latency_ms = (time.perf_counter() - start) * 1000
@@ -229,7 +246,7 @@ def _patch_httpx() -> None:
 
             return response
         except Exception:
-            _in_interceptor.reset(token)
+            _exit_interceptor(token)
             try:
                 latency_ms = (time.perf_counter() - start) * 1000
                 method = request.method if hasattr(request, "method") else "GET"
@@ -245,10 +262,10 @@ def _patch_httpx() -> None:
     _original_httpx_async_send = httpx.AsyncClient.send
 
     async def _patched_async_send(self: Any, request: Any, **kwargs: Any) -> Any:
-        if _in_interceptor.get(False):
+        if _is_in_interceptor():
             return await _original_httpx_async_send(self, request, **kwargs)
 
-        token = _in_interceptor.set(True)
+        token = _enter_interceptor()
         start = time.perf_counter()
         full_url = str(request.url) if hasattr(request, "url") else ""
         request_bytes = 0
@@ -261,7 +278,7 @@ def _patch_httpx() -> None:
 
         try:
             response = await _original_httpx_async_send(self, request, **kwargs)
-            _in_interceptor.reset(token)
+            _exit_interceptor(token)
 
             try:
                 latency_ms = (time.perf_counter() - start) * 1000
@@ -276,7 +293,7 @@ def _patch_httpx() -> None:
 
             return response
         except Exception:
-            _in_interceptor.reset(token)
+            _exit_interceptor(token)
             try:
                 latency_ms = (time.perf_counter() - start) * 1000
                 method = request.method if hasattr(request, "method") else "GET"
@@ -318,10 +335,10 @@ def _patch_aiohttp() -> None:
     _original_aiohttp_request = aiohttp.ClientSession._request
 
     async def _patched_request(self: Any, method: str, url: Any, **kwargs: Any) -> Any:
-        if _in_interceptor.get(False):
+        if _is_in_interceptor():
             return await _original_aiohttp_request(self, method, url, **kwargs)
 
-        token = _in_interceptor.set(True)
+        token = _enter_interceptor()
         start = time.perf_counter()
         full_url = str(url)
         request_bytes = 0
@@ -338,7 +355,7 @@ def _patch_aiohttp() -> None:
 
         try:
             response = await _original_aiohttp_request(self, method, url, **kwargs)
-            _in_interceptor.reset(token)
+            _exit_interceptor(token)
 
             try:
                 latency_ms = (time.perf_counter() - start) * 1000
@@ -352,7 +369,7 @@ def _patch_aiohttp() -> None:
 
             return response
         except Exception:
-            _in_interceptor.reset(token)
+            _exit_interceptor(token)
             try:
                 latency_ms = (time.perf_counter() - start) * 1000
                 if _callback is not None:

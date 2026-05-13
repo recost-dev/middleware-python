@@ -6,10 +6,11 @@ This is the primary entry point for SDK users.
 from __future__ import annotations
 
 import atexit
+import os
 import sys
 import threading
 import warnings
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from ._aggregator import Aggregator
 from ._interceptor import install, uninstall
@@ -28,6 +29,7 @@ class RecostHandle:
         transport: Optional[Transport],
         final_flush: Optional[Callable[[], None]] = None,
         shutdown_flush_timeout_ms: int = 3_000,
+        rebuild: Optional[Callable[["RecostHandle"], None]] = None,
     ) -> None:
         self._timer_stop = timer_stop
         self._timer_thread = timer_thread
@@ -35,6 +37,8 @@ class RecostHandle:
         self._final_flush = final_flush
         self._shutdown_flush_timeout_ms = shutdown_flush_timeout_ms
         self._disposed = False
+        self.pid: int = os.getpid()
+        self._rebuild = rebuild
         # Set by init() when auto_shutdown_handlers=True. Cleared in
         # dispose() so we don't keep a dangling atexit registration after
         # explicit teardown — without this, a long-lived process that
@@ -47,6 +51,19 @@ class RecostHandle:
         if self._transport is None:
             return None
         return self._transport.last_flush_status
+
+    def reinit_after_fork(self) -> None:
+        """Recreate timer thread + transport in the current PID. Idempotent within a PID."""
+        if self._rebuild is None:
+            return
+        if (
+            self.pid == os.getpid()
+            and self._timer_thread is not None
+            and self._timer_thread.is_alive()
+        ):
+            return  # No fork has happened; nothing to rebuild
+        self._rebuild(self)
+        self.pid = os.getpid()
 
     def dispose(self) -> None:
         """Stop intercepting, flush remaining events, and close transport connections.
@@ -92,6 +109,43 @@ class RecostHandle:
             global _handle
             if _handle is self:
                 _handle = None
+
+
+def _make_rebuild(
+    config: RecostConfig,
+    aggregator: Aggregator,
+    flush_interval_seconds: float,
+) -> Callable[[RecostHandle], None]:
+    """Return a rebuild closure that recreates the transport and timer thread.
+
+    Used by RecostHandle.reinit_after_fork() to restore the SDK in a forked
+    child process. The closure intentionally creates its own simpler timer
+    loop because the parent's _deferral cell does not survive fork.
+    """
+
+    def rebuild(handle: RecostHandle) -> None:
+        # Replace transport (new event loop, new WS thread)
+        new_transport = Transport(config)
+        handle._transport = new_transport
+        # Replace flush timer
+        new_stop = threading.Event()
+        handle._timer_stop = new_stop
+
+        def _loop() -> None:
+            while not new_stop.wait(timeout=flush_interval_seconds):
+                try:
+                    summary = aggregator.flush()
+                    if summary is not None:
+                        new_transport.send(summary)
+                except Exception as err:
+                    if config.on_error is not None:
+                        config.on_error(err)
+
+        t = threading.Thread(target=_loop, daemon=True)
+        t.start()
+        handle._timer_thread = t
+
+    return rebuild
 
 
 # Module-level handle so a second init() call disposes the first.
@@ -158,6 +212,13 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
             exclude_patterns.append(f"127.0.0.1:{config.local_port}")
             exclude_patterns.append(f"localhost:{config.local_port}")
 
+        # PID backstop cells — populated after `handle` is constructed below.
+        # The on_event closure reads these on every event so a forked child
+        # whose register_at_fork hook didn't fire (uwsgi lazy-fork, etc.)
+        # still self-repairs on the first intercepted call.
+        _handle_ref: List[Optional["RecostHandle"]] = [None]
+        _pid_warned: List[bool] = [False]
+
         def flush_and_send() -> None:
             summary = aggregator.flush()
             if summary is None:
@@ -171,6 +232,23 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
             transport.send(summary)
 
         def on_event(event: RawEvent) -> None:
+            # PID backstop: if the at-fork hook didn't fire on this platform,
+            # repair the handle lazily on the first event after the fork.
+            h = _handle_ref[0]
+            if h is not None and h.pid != os.getpid():
+                try:
+                    h.reinit_after_fork()
+                    if not _pid_warned[0]:
+                        _pid_warned[0] = True
+                        if config.on_error is not None:
+                            from ._types import RecostError
+                            config.on_error(RecostError(
+                                f"recost: detected fork without register_at_fork hook; "
+                                f"reinitialized in pid={os.getpid()}"
+                            ))
+                except Exception:
+                    return  # never let SDK errors break user code
+
             # Drop excluded URLs
             for pattern in exclude_patterns:
                 if pattern in event.url or pattern in event.host:
@@ -242,14 +320,17 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
                 elif debug:
                     print(f"[recost] flush error: {err}", file=sys.stderr)
 
+        rebuild = _make_rebuild(config, aggregator, flush_interval_seconds)
         handle = RecostHandle(
             timer_stop=stop_event,
             timer_thread=timer_thread,
             transport=transport,
             final_flush=_final_flush,
             shutdown_flush_timeout_ms=config.shutdown_flush_timeout_ms,
+            rebuild=rebuild,
         )
         _handle = handle
+        _handle_ref[0] = handle
 
         # Register an atexit hook so short-lived processes (cron, Lambda,
         # one-shot CLI scripts, SIGTERM'd containers) flush their last
@@ -260,5 +341,13 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
         if config.auto_shutdown_handlers:
             handle._atexit_callback = handle.dispose
             atexit.register(handle._atexit_callback)
+
+        if hasattr(os, "register_at_fork"):
+            def _after_fork() -> None:
+                try:
+                    handle.reinit_after_fork()
+                except Exception:
+                    pass  # Never let SDK errors crash a forked child
+            os.register_at_fork(after_in_child=_after_fork)
 
         return handle

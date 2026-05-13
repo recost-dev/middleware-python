@@ -325,3 +325,31 @@ class TestAtexitFlush:
         assert content.startswith("flushed:"), (
             f"marker content unexpected: {content!r}"
         )
+
+
+def test_handle_records_pid() -> None:
+    """The handle records the PID at init time."""
+    import os
+    from recost import init, RecostConfig
+    handle = init(RecostConfig(enabled=True, api_key=None))
+    try:
+        assert handle.pid == os.getpid()
+    finally:
+        handle.dispose()
+
+
+def test_reinit_after_fork_resets_pid_and_threads() -> None:
+    import os
+    from recost import init, RecostConfig
+    handle = init(RecostConfig(enabled=True, api_key=None, flush_interval=60.0))
+    try:
+        original_thread = handle._timer_thread
+        # Simulate post-fork state: stale pid + dead thread reference
+        handle.pid = 0  # impossible PID forces the rebuild branch
+        handle.reinit_after_fork()
+        assert handle._timer_thread is not original_thread
+        assert handle._timer_thread is not None
+        assert handle._timer_thread.is_alive()
+        assert handle.pid == os.getpid()
+    finally:
+        handle.dispose()

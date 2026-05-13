@@ -180,3 +180,11 @@ class RecostConfig:
 # ---------------------------------------------------------------------------
 
 TransportMode = Literal["local", "cloud"]
+
+
+# ---------------------------------------------------------------------------
+# Error hierarchy
+# ---------------------------------------------------------------------------
+
+class RecostError(Exception):
+    """Base class for typed SDK errors passed to on_error callbacks."""

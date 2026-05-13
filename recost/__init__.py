@@ -11,6 +11,7 @@ from ._types import (
     MetricEntry,
     ProviderDef,
     RawEvent,
+    RecostError,
     TransportMode,
     WindowSummary,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "WindowSummary",
     "ProviderDef",
     "RecostConfig",
+    "RecostError",
     "TransportMode",
     "FlushStatus",
     "ProviderRegistry",
