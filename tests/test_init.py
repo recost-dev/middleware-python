@@ -7,9 +7,7 @@ import subprocess
 import sys
 import textwrap
 import threading
-import time
 
-import pytest
 
 from recost._init import init
 from recost._interceptor import is_installed
