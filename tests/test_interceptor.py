@@ -21,6 +21,11 @@ from recost._types import RawEvent
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/notfound":
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         self.send_response(200)
         self.send_header("Content-Length", "2")
         self.end_headers()
@@ -46,6 +51,20 @@ def test_server():
     thread.start()
     yield f"http://127.0.0.1:{port}"
     server.shutdown()
+
+
+def _find_free_port() -> int:
+    """Bind an ephemeral TCP socket and immediately release it.
+
+    The returned port is very likely free for ~µs after this call, which is
+    enough for a single aiohttp connect attempt that we *want* to fail.
+    """
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 
 # ---------------------------------------------------------------------------
