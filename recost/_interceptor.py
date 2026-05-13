@@ -165,7 +165,7 @@ def _patch_urllib3() -> None:
                     _callback(_build_event(full_url, method, 0, latency_ms, request_bytes, 0))
             except Exception:
                 pass
-            raise exc
+            raise
 
     urllib3.HTTPConnectionPool.urlopen = _patched_urlopen  # type: ignore[method-assign,assignment]
 
@@ -237,7 +237,7 @@ def _patch_httpx() -> None:
                     _callback(_build_event(full_url, method, 0, latency_ms, request_bytes, 0))
             except Exception:
                 pass
-            raise exc
+            raise
 
     httpx.Client.send = _patched_send  # type: ignore[method-assign]
 
@@ -284,7 +284,7 @@ def _patch_httpx() -> None:
                     _callback(_build_event(full_url, method, 0, latency_ms, request_bytes, 0))
             except Exception:
                 pass
-            raise exc
+            raise
 
     httpx.AsyncClient.send = _patched_async_send  # type: ignore[method-assign]
 
@@ -359,7 +359,7 @@ def _patch_aiohttp() -> None:
                     _callback(_build_event(full_url, method, 0, latency_ms, request_bytes, 0))
             except Exception:
                 pass
-            raise exc
+            raise
 
     aiohttp.ClientSession._request = _patched_request  # type: ignore[method-assign,assignment]
 
