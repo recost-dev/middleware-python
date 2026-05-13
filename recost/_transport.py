@@ -104,9 +104,15 @@ class _LocalTransport:
     blocks the caller and never blocks the loop.
     """
 
-    def __init__(self, port: int, debug: bool = False) -> None:
+    def __init__(
+        self,
+        port: int,
+        debug: bool = False,
+        shutdown_timeout_s: float = 3.0,
+    ) -> None:
         self._port = port
         self._debug = debug
+        self._shutdown_timeout_s = shutdown_timeout_s
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -139,6 +145,15 @@ class _LocalTransport:
         self._ready.set()
         try:
             loop.run_until_complete(self._ws_loop())
+        except RuntimeError as exc:
+            # dispose() schedules loop.stop() to interrupt connect; on
+            # Python 3.14+ that causes run_until_complete to raise
+            # "Event loop stopped before Future completed." Treat ONLY
+            # that case as a clean shutdown; re-raise anything else so
+            # real coroutine bugs (e.g. "loop is already running") still
+            # surface.
+            if "stopped before Future" not in str(exc):
+                raise
         finally:
             try:
                 loop.close()
@@ -175,6 +190,9 @@ class _LocalTransport:
                             # unbounded queue and cannot yield the loop.
                             self._queue.put_nowait(msg)
                             break
+            except asyncio.CancelledError:
+                # Loop was stopped from dispose() while we were inside connect.
+                return
             except Exception:
                 if not self._running:
                     return
@@ -197,16 +215,36 @@ class _LocalTransport:
             pass
 
     def dispose(self) -> None:
+        """Stop the loop and join the transport thread.
+
+        The old implementation queued a None sentinel and waited up to 2 s for
+        the drain coroutine to see it. If the loop was inside
+        ``websockets.connect()`` (blocking on the upgrade handshake), the
+        sentinel sat in the queue until the OS TCP timeout (~75 s on Linux),
+        so the join timed out and the daemon thread + socket FD leaked.
+
+        The fix is to schedule ``loop.stop()`` directly via
+        ``call_soon_threadsafe`` — this interrupts the connect coroutine,
+        causing ``run_until_complete`` to return so the thread can exit.
+        ``shutdown_timeout_s`` (passed in from ``Transport.dispose`` so it
+        tracks ``shutdown_flush_timeout_ms``) bounds the join. If the thread
+        is still alive after that, log a warning — never block longer.
+        """
         self._running = False
         loop = self._loop
-        queue_ = self._queue
-        if self._has_websockets and loop is not None and queue_ is not None and not loop.is_closed():
+        if self._has_websockets and loop is not None and not loop.is_closed():
             try:
-                asyncio.run_coroutine_threadsafe(queue_.put(None), loop)
+                loop.call_soon_threadsafe(loop.stop)
             except RuntimeError:
+                # Loop was already closed between is_closed() and the schedule.
                 pass
         if self._thread is not None:
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=self._shutdown_timeout_s)
+            if self._thread.is_alive():
+                logger.warning(
+                    "[recost] local transport thread did not exit within "
+                    f"{self._shutdown_timeout_s}s; FD may leak"
+                )
             self._thread = None
 
 
@@ -231,7 +269,11 @@ class Transport:
 
         self._local: Optional[_LocalTransport] = None
         if self.mode == "local":
-            self._local = _LocalTransport(config.local_port, config.debug)
+            self._local = _LocalTransport(
+                config.local_port,
+                config.debug,
+                shutdown_timeout_s=config.shutdown_flush_timeout_ms / 1000.0,
+            )
 
     @property
     def last_flush_status(self) -> Optional[FlushStatus]:
