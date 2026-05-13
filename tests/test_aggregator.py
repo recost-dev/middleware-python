@@ -4,6 +4,8 @@ Tests for recost/_aggregator.py
 Ported from the Node SDK's aggregator.test.ts.
 """
 
+import sys
+import threading
 from datetime import datetime, timezone
 
 from recost._aggregator import Aggregator, MAX_BUCKETS
@@ -380,3 +382,59 @@ class TestBucketOverflow:
         assert agg.bucket_count == 2000
         overflow = make_event(provider="p2000", endpoint_category="ep2000")
         assert agg.would_overflow(overflow)
+
+
+# ---------------------------------------------------------------------------
+# Thread safety
+# ---------------------------------------------------------------------------
+
+
+class TestThreadSafety:
+    """Regression tests for issue #1 — Aggregator must be safe under concurrent
+    ingest (user threads) + flush (timer thread)."""
+
+    def test_concurrent_ingest_and_flush_does_not_raise(self):
+        """Stress: 4 ingester threads run 50000 ingests each (200k total) while
+        one flusher thread runs 500 flushes. Uses ``sys.setswitchinterval`` to
+        force aggressive GIL handoff so the race window is reliably hit.
+        Pre-fix this raises ``RuntimeError: dictionary changed size during
+        iteration``. Post-fix it must complete without any exception."""
+        agg = Aggregator()
+        exceptions: list[BaseException] = []
+        iterations_per_ingester = 50000
+        num_ingesters = 4
+        num_flushes = 500
+
+        def ingester() -> None:
+            try:
+                for i in range(iterations_per_ingester):
+                    p = f"p{i % 100}"
+                    agg.ingest(make_event(provider=p, endpoint_category=p))
+            except BaseException as exc:  # noqa: BLE001 — we want everything
+                exceptions.append(exc)
+
+        def flusher() -> None:
+            try:
+                for _ in range(num_flushes):
+                    agg.flush()
+            except BaseException as exc:  # noqa: BLE001
+                exceptions.append(exc)
+
+        # Force aggressive thread switching so the race window is hit reliably
+        # on modern CPython where short Python operations rarely yield the GIL.
+        original_interval = sys.getswitchinterval()
+        sys.setswitchinterval(0.000001)
+        try:
+            threads = [threading.Thread(target=ingester) for _ in range(num_ingesters)]
+            threads.append(threading.Thread(target=flusher))
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30.0)
+        finally:
+            sys.setswitchinterval(original_interval)
+
+        assert not exceptions, f"unexpected exceptions: {exceptions!r}"
+        # Sanity: at least some threads ran to completion.
+        for t in threads:
+            assert not t.is_alive(), "a worker thread is still running"
