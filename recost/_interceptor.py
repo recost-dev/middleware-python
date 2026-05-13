@@ -10,6 +10,7 @@ Every wrapper is safety-wrapped so SDK errors can never break application code.
 from __future__ import annotations
 
 import contextvars
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
@@ -29,6 +30,12 @@ EventCallback = Callable[[RawEvent], None]
 
 _installed: bool = False
 _callback: Optional[EventCallback] = None
+
+# Guards install / uninstall / is_installed so the patched-method state
+# cannot drift away from the _installed flag under concurrent callers.
+# RLock so the same thread can re-enter (e.g. from a callback that
+# triggers reinstall). See issue #4.
+_install_lock: threading.RLock = threading.RLock()
 
 # Original function references — restored on uninstall
 _original_urllib3_urlopen = None
@@ -372,29 +379,32 @@ def _unpatch_aiohttp() -> None:
 def install(callback: EventCallback) -> None:
     """Install patches on urllib3, httpx, and aiohttp. No-op if already installed."""
     global _installed, _callback
-    if _installed:
-        return
+    with _install_lock:
+        if _installed:
+            return
 
-    _callback = callback
-    _patch_urllib3()
-    _patch_httpx()
-    _patch_aiohttp()
-    _installed = True
+        _callback = callback
+        _patch_urllib3()
+        _patch_httpx()
+        _patch_aiohttp()
+        _installed = True
 
 
 def uninstall() -> None:
     """Restore all patched functions to their originals. No-op if not installed."""
     global _installed, _callback
-    if not _installed:
-        return
+    with _install_lock:
+        if not _installed:
+            return
 
-    _unpatch_urllib3()
-    _unpatch_httpx()
-    _unpatch_aiohttp()
-    _callback = None
-    _installed = False
+        _unpatch_urllib3()
+        _unpatch_httpx()
+        _unpatch_aiohttp()
+        _callback = None
+        _installed = False
 
 
 def is_installed() -> bool:
     """Returns True if patches are currently active."""
-    return _installed
+    with _install_lock:
+        return _installed

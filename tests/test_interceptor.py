@@ -188,3 +188,106 @@ class TestSafety:
         import requests
         requests.get(f"{test_server}/after-uninstall")
         assert len(events) == 0
+
+
+# ---------------------------------------------------------------------------
+# Thread safety — install/uninstall race
+# ---------------------------------------------------------------------------
+
+import sys
+import threading
+
+
+class TestInstallUninstallRace:
+    """Regression tests for issue #4 — install/uninstall must be safe under
+    concurrent calls so the patch state cannot drift away from the
+    ``_installed`` flag."""
+
+    def test_concurrent_install_uninstall_leaves_consistent_state(self):
+        """N threads each loop install/uninstall many times. After all
+        threads finish, the interceptor must be uninstalled and no exception
+        should have been raised."""
+        from recost._interceptor import install, uninstall, is_installed
+
+        iterations_per_thread = 200
+        num_threads = 4
+        exceptions: list[BaseException] = []
+
+        def _noop(_event) -> None:
+            pass
+
+        def worker() -> None:
+            try:
+                for _ in range(iterations_per_thread):
+                    install(_noop)
+                    uninstall()
+            except BaseException as exc:  # noqa: BLE001
+                exceptions.append(exc)
+
+        # Force aggressive GIL yields so the race fires reliably on modern
+        # CPython. Restored in finally.
+        original_switch = sys.getswitchinterval()
+        sys.setswitchinterval(0.000001)
+        try:
+            threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30.0)
+        finally:
+            sys.setswitchinterval(original_switch)
+
+        assert not exceptions, f"unexpected exceptions: {exceptions!r}"
+        assert not is_installed(), "interceptor should be uninstalled after the race"
+
+    def test_concurrent_install_uninstall_does_not_leak_patches(self):
+        """Pre-fix: two threads can both enter ``install()`` before either has
+        set ``_installed = True``, both patch the target, and the second
+        wraps the first. A subsequent ``uninstall()`` unwraps only the
+        outer layer — the inner wrapper persists even after ``_installed``
+        is False. This test verifies the original urllib3 callable is
+        restored after a concurrent install/uninstall race."""
+        try:
+            import urllib3
+        except ImportError:
+            import pytest
+
+            pytest.skip("urllib3 not installed")
+
+        from recost._interceptor import install, uninstall, is_installed
+
+        original_urlopen = urllib3.HTTPConnectionPool.urlopen
+
+        def _noop(_event) -> None:
+            pass
+
+        iterations_per_thread = 200
+        num_threads = 4
+        exceptions: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                for _ in range(iterations_per_thread):
+                    install(_noop)
+                    uninstall()
+            except BaseException as exc:  # noqa: BLE001
+                exceptions.append(exc)
+
+        original_switch = sys.getswitchinterval()
+        sys.setswitchinterval(0.000001)
+        try:
+            threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30.0)
+        finally:
+            sys.setswitchinterval(original_switch)
+
+        assert not exceptions, f"unexpected exceptions: {exceptions!r}"
+        assert not is_installed(), "interceptor should be uninstalled"
+        # The critical invariant: urllib3's method is back to its real
+        # original, not a recost wrapper.
+        assert urllib3.HTTPConnectionPool.urlopen is original_urlopen, (
+            "concurrent install/uninstall left a recost wrapper in place"
+        )
