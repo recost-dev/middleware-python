@@ -120,7 +120,7 @@ class _LocalTransport:
         self._ready = threading.Event()
 
         try:
-            import websockets  # type: ignore[import-untyped]  # noqa: F401
+            import websockets  # noqa: F401
             self._has_websockets = True
         except ImportError:
             self._has_websockets = False

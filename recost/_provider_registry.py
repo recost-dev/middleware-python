@@ -113,7 +113,7 @@ def _host_matches(pattern: str, hostname: str) -> bool:
 # Twilio path refinement
 # ---------------------------------------------------------------------------
 
-def _refine_twilio(pathname: str) -> tuple:
+def _refine_twilio(pathname: str) -> tuple[str, float]:
     """Refine category and cost for Twilio after a host-level match."""
     if "/Messages" in pathname:
         return "sms", 0.79
