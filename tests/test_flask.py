@@ -4,8 +4,6 @@ Tests for recost/frameworks/flask.py
 
 import warnings
 
-import pytest
-
 from recost._interceptor import is_installed, uninstall
 from recost._types import RecostConfig
 
