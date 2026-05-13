@@ -336,3 +336,27 @@ async def test_aiohttp_formdata_body_records_size(mock_http_server_200) -> None:
         assert ev.request_bytes > 0
     finally:
         uninstall()
+
+
+def test_httpx_streaming_content_not_materialized(mock_http_server_200) -> None:  # type: ignore[no-untyped-def]
+    """Passing an async-iterable body to httpx must not be read by the interceptor.
+    The crucial assertion: request_bytes is 0 (we skipped sizing the stream) and
+    the SDK does not crash."""
+    import httpx
+    from recost._interceptor import install, uninstall
+
+    events: list = []
+    install(events.append)
+
+    def stream_body():
+        yield b"chunk1"
+        yield b"chunk2"
+
+    try:
+        req = httpx.Request("POST", mock_http_server_200.url, content=stream_body())
+        with httpx.Client() as client:
+            client.send(req)
+        ev = events[-1]
+        assert ev.request_bytes == 0
+    finally:
+        uninstall()

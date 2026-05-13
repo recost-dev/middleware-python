@@ -224,8 +224,10 @@ def _patch_httpx() -> None:
         request_bytes = 0
 
         try:
-            if hasattr(request, "content") and request.content is not None:
-                request_bytes = len(request.content)
+            content = getattr(request, "content", None)
+            if isinstance(content, (bytes, bytearray)):
+                request_bytes = len(content)
+            # Non-bytes (streaming/async-iterable) — skip sizing; never materialize.
         except Exception:
             pass
 
@@ -271,8 +273,10 @@ def _patch_httpx() -> None:
         request_bytes = 0
 
         try:
-            if hasattr(request, "content") and request.content is not None:
-                request_bytes = len(request.content)
+            content = getattr(request, "content", None)
+            if isinstance(content, (bytes, bytearray)):
+                request_bytes = len(content)
+            # Non-bytes (streaming/async-iterable) — skip sizing; never materialize.
         except Exception:
             pass
 
