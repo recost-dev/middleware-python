@@ -460,3 +460,87 @@ class TestPrivacy:
         assert result == "https://h/p"
         assert "user" not in result
         assert "pass" not in result
+
+
+# ---------------------------------------------------------------------------
+# Generic aiohttp interception (#9)
+# ---------------------------------------------------------------------------
+
+
+class TestAiohttp:
+    """Mirrors TestUrllib3 / TestHttpxAsync. Wave A's aiohttp tests cover only
+    body sizing; these pin success, non-2xx, exception, and double-count."""
+
+    @pytest.mark.asyncio
+    async def test_captures_get(self, test_server):
+        events: list[RawEvent] = []
+        install(events.append)
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{test_server}/aio") as resp:
+                    assert resp.status == 200
+                    await resp.read()
+            assert len(events) == 1, f"expected 1 event, got {len(events)}"
+            event = events[0]
+            assert event.method == "GET"
+            assert "/aio" in event.url
+            assert event.status_code == 200
+            assert event.latency_ms >= 0
+        finally:
+            uninstall()
+
+    @pytest.mark.asyncio
+    async def test_captures_non_2xx_marks_error(self, test_server):
+        events: list[RawEvent] = []
+        install(events.append)
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{test_server}/notfound") as resp:
+                    assert resp.status == 404
+                    await resp.read()
+            assert len(events) == 1
+            assert events[0].status_code == 404
+            assert events[0].error is True
+        finally:
+            uninstall()
+
+    @pytest.mark.asyncio
+    async def test_exception_path_captures_status_zero(self):
+        """Pointing aiohttp at a closed port raises ClientError and we still
+        capture an event with status_code=0, error=True."""
+        events: list[RawEvent] = []
+        install(events.append)
+        try:
+            import aiohttp
+            dead_port = _find_free_port()
+            url = f"http://127.0.0.1:{dead_port}/x"
+            with pytest.raises(aiohttp.ClientError):
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url) as resp:
+                        await resp.read()
+            assert len(events) == 1
+            assert events[0].status_code == 0
+            assert events[0].error is True
+        finally:
+            uninstall()
+
+    @pytest.mark.asyncio
+    async def test_no_double_count_via_internal_connector(self, test_server):
+        """One session.get must produce exactly one event, even though
+        aiohttp's connector internals can use a DNS thread pool that hops
+        OS threads. The dual task+thread reentrancy guard covers this."""
+        events: list[RawEvent] = []
+        install(events.append)
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{test_server}/dc") as resp:
+                    await resp.read()
+            assert len(events) == 1, (
+                f"expected 1 event, got {len(events)} — possible double-count "
+                f"regression in the reentrancy guard"
+            )
+        finally:
+            uninstall()
