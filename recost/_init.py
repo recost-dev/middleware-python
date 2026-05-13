@@ -5,6 +5,7 @@ This is the primary entry point for SDK users.
 
 from __future__ import annotations
 
+import atexit
 import sys
 import threading
 import warnings
@@ -34,6 +35,11 @@ class RecostHandle:
         self._final_flush = final_flush
         self._shutdown_flush_timeout_ms = shutdown_flush_timeout_ms
         self._disposed = False
+        # Set by init() when auto_shutdown_handlers=True. Cleared in
+        # dispose() so we don't keep a dangling atexit registration after
+        # explicit teardown — without this, a long-lived process that
+        # init/dispose's many times accumulates dead atexit callbacks.
+        self._atexit_callback: Optional[Callable[[], None]] = None
 
     @property
     def last_flush_status(self) -> Optional[FlushStatus]:
@@ -50,11 +56,24 @@ class RecostHandle:
         ``shutdown_flush_timeout_ms``. The transport is only disposed after
         the final flush settles or its timeout elapses, so an in-flight
         cloud POST is not cut off mid-request.
+
+        Idempotent — safe to call from atexit and explicit teardown.
         """
         with _init_lock:
             if self._disposed:
                 return
             self._disposed = True
+
+            # Unregister the atexit hook so a long-lived process that
+            # cycles init/dispose does not accumulate dead callbacks.
+            # atexit.unregister is a no-op if the callable isn't currently
+            # registered, so this is safe under any registration state.
+            if self._atexit_callback is not None:
+                try:
+                    atexit.unregister(self._atexit_callback)
+                except Exception:
+                    pass
+                self._atexit_callback = None
 
             self._timer_stop.set()
             if self._timer_thread is not None:
@@ -231,4 +250,15 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
             shutdown_flush_timeout_ms=config.shutdown_flush_timeout_ms,
         )
         _handle = handle
+
+        # Register an atexit hook so short-lived processes (cron, Lambda,
+        # one-shot CLI scripts, SIGTERM'd containers) flush their last
+        # bucket. The flush timer is a daemon thread and dies on exit;
+        # without atexit the last window is silently dropped. The hook
+        # delegates to handle.dispose(), which is idempotent — explicit
+        # dispose() before exit is still fine.
+        if config.auto_shutdown_handlers:
+            handle._atexit_callback = handle.dispose
+            atexit.register(handle._atexit_callback)
+
         return handle

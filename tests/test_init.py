@@ -2,7 +2,10 @@
 Tests for recost/_init.py
 """
 
+import atexit
+import subprocess
 import sys
+import textwrap
 import threading
 import time
 
@@ -186,3 +189,141 @@ class TestInitDisposeRace:
         assert not exceptions, f"unexpected exceptions: {exceptions!r}"
         assert init_module._handle is None, "module-level _handle should be None"
         assert not is_installed(), "interceptor should be uninstalled"
+
+
+# ---------------------------------------------------------------------------
+# Process lifecycle — atexit flush
+# ---------------------------------------------------------------------------
+
+
+class TestAtexitFlush:
+    """Regression tests for issue #6 — a normal process exit (sys.exit,
+    end of __main__, SIGTERM in a container) must flush the last
+    aggregator bucket. Pre-fix the flush timer is a daemon thread, so
+    process exit kills it and the last window is silently dropped."""
+
+    def test_init_registers_atexit_when_enabled(self):
+        """The atexit module exposes a list of registered callables only
+        on CPython. We test by recording calls to a patched atexit.register
+        instead of inspecting atexit internals — portable + behavioral."""
+        from recost._init import init
+        from recost._types import RecostConfig
+
+        registered: list = []
+        original_register = atexit.register
+
+        def recording_register(func, *args, **kwargs):
+            registered.append(func)
+            return original_register(func, *args, **kwargs)
+
+        atexit.register = recording_register  # type: ignore[assignment]
+        try:
+            handle = init(RecostConfig(enabled=True, auto_shutdown_handlers=True))
+            handle.dispose()
+        finally:
+            atexit.register = original_register  # type: ignore[assignment]
+
+        # At least one callable was registered by init().
+        assert registered, "init() did not register an atexit callback"
+
+    def test_init_skips_atexit_when_disabled(self):
+        """auto_shutdown_handlers=False opts out of the registration."""
+        from recost._init import init
+        from recost._types import RecostConfig
+
+        registered: list = []
+        original_register = atexit.register
+
+        def recording_register(func, *args, **kwargs):
+            registered.append(func)
+            return original_register(func, *args, **kwargs)
+
+        atexit.register = recording_register  # type: ignore[assignment]
+        try:
+            handle = init(RecostConfig(enabled=True, auto_shutdown_handlers=False))
+            handle.dispose()
+        finally:
+            atexit.register = original_register  # type: ignore[assignment]
+
+        assert registered == [], (
+            f"init() registered an atexit callback despite the opt-out: {registered!r}"
+        )
+
+    def test_subprocess_exit_flushes_final_bucket(self, tmp_path):
+        """End-to-end: spawn a Python subprocess, init recost, generate one
+        event, exit normally. Verify the transport's `send` was called —
+        i.e. the atexit handler ran the final flush before the daemon
+        thread died."""
+        marker = tmp_path / "flush_marker.txt"
+
+        # The child script monkey-patches Transport.send to write a marker
+        # file when called, then init's recost with a tiny event, then
+        # exits via sys.exit(0). If atexit works, the marker is written.
+        script = textwrap.dedent(f"""
+            import sys
+            from recost._init import init
+            from recost._transport import Transport
+            from recost._types import RecostConfig
+
+            original_send = Transport.send
+
+            def patched_send(self, summary):
+                with open({str(marker)!r}, "w") as f:
+                    f.write("flushed:" + str(len(summary.metrics)))
+                return original_send(self, summary)
+
+            Transport.send = patched_send
+
+            handle = init(RecostConfig(
+                enabled=True,
+                # Use a long flush_interval so only the atexit/final flush fires.
+                flush_interval_ms=600_000,
+                # Disable transport network IO via a fake api_key so cloud
+                # mode hits our patched send (we don't care if HTTP fails).
+                api_key="test",
+                project_id="test",
+                base_url="http://127.0.0.1:1",
+            ))
+
+            # Ingest one event directly through the interceptor's callback so
+            # the aggregator has something to flush.
+            from recost._types import RawEvent
+            from recost._interceptor import _callback
+            assert _callback is not None
+            _callback(RawEvent(
+                method="GET",
+                url="https://api.openai.com/v1/chat/completions",
+                host="api.openai.com",
+                path="/v1/chat/completions",
+                status_code=200,
+                latency_ms=10,
+                request_bytes=0,
+                response_bytes=0,
+                timestamp="2026-05-13T00:00:00Z",
+            ))
+
+            sys.exit(0)
+        """).strip()
+
+        script_path = tmp_path / "child.py"
+        script_path.write_text(script)
+
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0, (
+            f"child exited {result.returncode}\nstdout: {result.stdout}\n"
+            f"stderr: {result.stderr}"
+        )
+        assert marker.exists(), (
+            f"atexit final flush did not run. "
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        content = marker.read_text()
+        assert content.startswith("flushed:"), (
+            f"marker content unexpected: {content!r}"
+        )

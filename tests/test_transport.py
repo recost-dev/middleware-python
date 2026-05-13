@@ -400,3 +400,63 @@ class TestLocalTransportAsync:
             assert elapsed < 0.5
         finally:
             t.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Thread safety — dispose during WebSocket connect must not leak the thread
+# ---------------------------------------------------------------------------
+
+
+class TestDisposeDuringConnect:
+    """Regression for issue #6 — when dispose() lands while the loop is inside
+    websockets.connect()'s blocking TCP+upgrade handshake, the old sentinel-
+    in-queue dispose path could leave the daemon thread + socket FD pinned
+    until the OS TCP timeout (~75 s). The fix stops the loop directly."""
+
+    @staticmethod
+    def _start_blackhole_server(port: int) -> socket.socket:
+        """Bind+listen on `port` and accept connections but never respond
+        to the HTTP upgrade. websockets.connect() will TCP-connect, send its
+        upgrade request, and then block waiting for an HTTP response."""
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", port))
+        srv.listen(8)
+        accepted: list[socket.socket] = []
+
+        def accept_loop() -> None:
+            srv.settimeout(0.5)
+            while True:
+                try:
+                    conn, _ = srv.accept()
+                    accepted.append(conn)
+                except (OSError, socket.timeout):
+                    if srv.fileno() == -1:
+                        return
+
+        threading.Thread(target=accept_loop, daemon=True).start()
+        return srv
+
+    def test_dispose_during_connect_returns_promptly(self):
+        pytest.importorskip("websockets")
+        port = _find_free_port()
+        server = self._start_blackhole_server(port)
+        try:
+            t = _LocalTransport(port=port)
+            # Give the transport a tick to enter websockets.connect's
+            # post-TCP-accept handshake wait.
+            time.sleep(0.5)
+            start = time.monotonic()
+            t.dispose()
+            elapsed = time.monotonic() - start
+            assert t._thread is None, "transport thread did not join"
+            # Pre-fix this took ~75s on Linux (OS TCP timeout) or ~2.5s on
+            # Windows (the old 2s join + dispose overhead). Post-fix the
+            # loop.stop() path returns in well under a second. The 1.5s
+            # threshold catches a regression to the queue-sentinel design
+            # while leaving headroom for slow CI hosts.
+            assert elapsed < 1.5, (
+                f"dispose() took {elapsed:.2f}s — the loop did not stop "
+                f"while inside websockets.connect()"
+            )
+        finally:
+            server.close()
