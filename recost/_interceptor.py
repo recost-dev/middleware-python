@@ -53,9 +53,6 @@ _in_interceptor_task: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 _in_interceptor_thread = threading.local()
 
-# Original Thread.__init__ — restored on uninstall
-_original_thread_init: Any = None
-
 
 def _is_in_interceptor() -> bool:
     return _in_interceptor_task.get() or bool(getattr(_in_interceptor_thread, "flag", False))
@@ -70,35 +67,6 @@ def _enter_interceptor() -> Token[bool]:
 def _exit_interceptor(token: Token[bool]) -> None:
     _in_interceptor_task.reset(token)
     _in_interceptor_thread.flag = False
-
-
-def _patch_thread() -> None:
-    """Patch threading.Thread to propagate the interceptor ContextVar into child threads.
-
-    ContextVars are not inherited by new threads by default. When the interceptor
-    guard is active in the spawning thread, child threads must also see it — otherwise
-    a library that internally pools work onto a worker thread causes double-recording.
-    """
-    global _original_thread_init
-    _original_thread_init = threading.Thread.__init__
-
-    orig_init = _original_thread_init
-
-    def _patched_thread_init(self: Any, *args: Any, **kwargs: Any) -> None:
-        # If no explicit context is passed and the guard is currently set,
-        # propagate a copy of the current context so the child thread inherits it.
-        if "context" not in kwargs and _in_interceptor_task.get():
-            kwargs["context"] = contextvars.copy_context()
-        orig_init(self, *args, **kwargs)
-
-    threading.Thread.__init__ = _patched_thread_init  # type: ignore[method-assign]
-
-
-def _unpatch_thread() -> None:
-    global _original_thread_init
-    if _original_thread_init is not None:
-        threading.Thread.__init__ = _original_thread_init  # type: ignore[method-assign]
-        _original_thread_init = None
 
 # ---------------------------------------------------------------------------
 # URL helpers
@@ -441,7 +409,6 @@ def install(callback: EventCallback) -> None:
         _patch_urllib3()
         _patch_httpx()
         _patch_aiohttp()
-        _patch_thread()
         _installed = True
 
 
@@ -455,7 +422,6 @@ def uninstall() -> None:
         _unpatch_urllib3()
         _unpatch_httpx()
         _unpatch_aiohttp()
-        _unpatch_thread()
         _callback = None
         _installed = False
 
