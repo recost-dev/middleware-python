@@ -278,7 +278,8 @@ class TestAtexitFlush:
                 flush_interval_ms=600_000,
                 # Disable transport network IO via a fake api_key so cloud
                 # mode hits our patched send (we don't care if HTTP fails).
-                api_key="test",
+                # Must start with 'rc-' to pass api_key format validation.
+                api_key="rc-test",
                 project_id="test",
                 base_url="http://127.0.0.1:1",
             ))
