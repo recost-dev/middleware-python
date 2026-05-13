@@ -9,11 +9,24 @@ Direct port of the Node SDK's aggregator.ts.
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from ._types import MetricEntry, RawEvent, WindowSummary
+
+
+# ---------------------------------------------------------------------------
+# Bucket cap — matches the ingest API's 422 threshold
+# ---------------------------------------------------------------------------
+
+MAX_BUCKETS = 2000
+"""Maximum unique (provider, endpoint, method) triplets per window.
+
+Crossing this mid-window triggers an early flush so the current window is
+preserved instead of silently dropped when the API returns 422.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -60,53 +73,87 @@ class Aggregator:
         project_id: str = "",
         environment: str = "development",
         sdk_version: str = "0.0.0",
+        max_buckets: int = MAX_BUCKETS,
     ) -> None:
         self._project_id = project_id
         self._environment = environment
         self._sdk_version = sdk_version
+        self._max_buckets = max_buckets
         self._buckets: Dict[str, _Bucket] = {}
         self._window_start: Optional[str] = None
         self._size = 0
+        # RLock so a single thread can re-enter (e.g. if a future event
+        # callback ever calls back into the aggregator). Guards every method
+        # below that reads or writes _buckets / _window_start / _size.
+        self._lock = threading.RLock()
 
     # ---------------------------------------------------------------------------
     # Public API
     # ---------------------------------------------------------------------------
 
-    def ingest(self, event: RawEvent, cost_cents: float = 0.0) -> None:
-        """Add one RawEvent to the current window."""
-        if self._window_start is None:
-            self._window_start = event.timestamp
-
+    @staticmethod
+    def _key_for(event: RawEvent) -> str:
         provider = event.provider if event.provider is not None else "unknown"
         endpoint = event.endpoint_category if event.endpoint_category is not None else event.path
-        key = f"{provider}::{endpoint}::{event.method}"
+        return f"{provider}::{endpoint}::{event.method}"
 
-        bucket = self._buckets.get(key)
-        if bucket is None:
-            bucket = _Bucket(provider=provider, endpoint=endpoint, method=event.method)
-            self._buckets[key] = bucket
+    def would_overflow(self, event: RawEvent) -> bool:
+        """True if ingesting ``event`` would allocate a new bucket while the
+        window is already at capacity. Callers should flush before ingesting."""
+        with self._lock:
+            if len(self._buckets) < self._max_buckets:
+                return False
+            return self._key_for(event) not in self._buckets
 
-        bucket.request_count += 1
-        if event.error:
-            bucket.error_count += 1
-        bucket.latencies.append(event.latency_ms)
-        bucket.total_request_bytes += event.request_bytes
-        bucket.total_response_bytes += event.response_bytes
-        bucket.estimated_cost_cents += cost_cents
+    def ingest(self, event: RawEvent, cost_cents: float = 0.0) -> None:
+        """Add one RawEvent to the current window."""
+        with self._lock:
+            if self._window_start is None:
+                self._window_start = event.timestamp
 
-        self._size += 1
+            provider = event.provider if event.provider is not None else "unknown"
+            endpoint = event.endpoint_category if event.endpoint_category is not None else event.path
+            key = self._key_for(event)
+
+            bucket = self._buckets.get(key)
+            if bucket is None:
+                bucket = _Bucket(provider=provider, endpoint=endpoint, method=event.method)
+                self._buckets[key] = bucket
+
+            bucket.request_count += 1
+            if event.error:
+                bucket.error_count += 1
+            bucket.latencies.append(event.latency_ms)
+            bucket.total_request_bytes += event.request_bytes
+            bucket.total_response_bytes += event.response_bytes
+            bucket.estimated_cost_cents += cost_cents
+
+            self._size += 1
 
     def flush(self) -> Optional[WindowSummary]:
-        """Compress the current window into a WindowSummary and reset state."""
-        if not self._buckets:
-            return None
+        """Compress the current window into a WindowSummary and reset state.
 
-        window_start = self._window_start or datetime.now(timezone.utc).isoformat()
+        Swap-and-process: under the lock, take ownership of the current
+        buckets dict and reset state; then sort/percentile-compute outside
+        the lock so ingest is not blocked for the duration of the flush.
+        """
+        with self._lock:
+            if not self._buckets:
+                return None
+            buckets_to_flush = self._buckets
+            window_start_captured = self._window_start
+            # Reset state before releasing the lock so concurrent ingests
+            # land in the *next* window, not this one.
+            self._buckets = {}
+            self._window_start = None
+            self._size = 0
+
+        # Outside the lock: format timestamps and build the summary.
         window_end = datetime.now(timezone.utc).isoformat()
+        window_start = window_start_captured or window_end
 
         metrics: List[MetricEntry] = []
-
-        for bucket in self._buckets.values():
+        for bucket in buckets_to_flush.values():
             sorted_latencies = sorted(bucket.latencies)
             total_latency_ms = sum(sorted_latencies)
 
@@ -124,11 +171,6 @@ class Aggregator:
                 estimated_cost_cents=bucket.estimated_cost_cents,
             ))
 
-        # Reset
-        self._buckets = {}
-        self._window_start = None
-        self._size = 0
-
         return WindowSummary(
             project_id=self._project_id,
             environment=self._environment,
@@ -142,9 +184,16 @@ class Aggregator:
     @property
     def size(self) -> int:
         """Total events ingested since the last flush."""
-        return self._size
+        with self._lock:
+            return self._size
 
     @property
     def bucket_count(self) -> int:
         """Number of unique provider + endpoint + method groups."""
-        return len(self._buckets)
+        with self._lock:
+            return len(self._buckets)
+
+    @property
+    def max_buckets(self) -> int:
+        """Configured maximum buckets per window."""
+        return self._max_buckets

@@ -4,9 +4,11 @@ Tests for recost/_aggregator.py
 Ported from the Node SDK's aggregator.test.ts.
 """
 
+import sys
+import threading
 from datetime import datetime, timezone
 
-from recost._aggregator import Aggregator
+from recost._aggregator import Aggregator, MAX_BUCKETS
 from recost._types import RawEvent
 
 
@@ -337,3 +339,166 @@ class TestSizeAndBucketCount:
         assert len(summary.metrics) == 10
         for entry in summary.metrics:
             assert entry.request_count == 100
+
+
+# ---------------------------------------------------------------------------
+# Bucket overflow protection
+# ---------------------------------------------------------------------------
+
+class TestBucketOverflow:
+    def test_max_buckets_constant_is_2000(self):
+        assert MAX_BUCKETS == 2000
+
+    def test_would_overflow_false_below_cap(self):
+        agg = Aggregator(max_buckets=10)
+        for i in range(5):
+            agg.ingest(make_event(provider=f"p{i}", endpoint_category=f"ep{i}"))
+        assert not agg.would_overflow(make_event(provider="new", endpoint_category="new"))
+
+    def test_would_overflow_false_for_existing_key_at_cap(self):
+        agg = Aggregator(max_buckets=3)
+        agg.ingest(make_event(provider="a", endpoint_category="a"))
+        agg.ingest(make_event(provider="b", endpoint_category="b"))
+        agg.ingest(make_event(provider="c", endpoint_category="c"))
+        assert agg.bucket_count == 3
+        # Same triplet — no new bucket needed
+        assert not agg.would_overflow(make_event(provider="a", endpoint_category="a"))
+
+    def test_would_overflow_true_for_new_key_at_cap(self):
+        agg = Aggregator(max_buckets=3)
+        agg.ingest(make_event(provider="a", endpoint_category="a"))
+        agg.ingest(make_event(provider="b", endpoint_category="b"))
+        agg.ingest(make_event(provider="c", endpoint_category="c"))
+        assert agg.would_overflow(make_event(provider="d", endpoint_category="d"))
+
+    def test_max_buckets_property(self):
+        assert Aggregator(max_buckets=500).max_buckets == 500
+        assert Aggregator().max_buckets == MAX_BUCKETS
+
+    def test_default_cap_fires_at_2001st_triplet(self):
+        agg = Aggregator()
+        for i in range(2000):
+            agg.ingest(make_event(provider=f"p{i}", endpoint_category=f"ep{i}"))
+        assert agg.bucket_count == 2000
+        overflow = make_event(provider="p2000", endpoint_category="ep2000")
+        assert agg.would_overflow(overflow)
+
+
+# ---------------------------------------------------------------------------
+# Thread safety
+# ---------------------------------------------------------------------------
+
+
+class TestThreadSafety:
+    """Regression tests for issue #1 — Aggregator must be safe under concurrent
+    ingest (user threads) + flush (timer thread)."""
+
+    def test_concurrent_ingest_and_flush_does_not_raise(self):
+        """Stress: 4 ingester threads run 50000 ingests each (200k total) while
+        one flusher thread runs 500 flushes. Uses ``sys.setswitchinterval`` to
+        force aggressive GIL handoff so the race window is reliably hit.
+        Pre-fix this raises ``RuntimeError: dictionary changed size during
+        iteration``. Post-fix it must complete without any exception."""
+        agg = Aggregator()
+        exceptions: list[BaseException] = []
+        iterations_per_ingester = 50000
+        num_ingesters = 4
+        num_flushes = 500
+
+        def ingester() -> None:
+            try:
+                for i in range(iterations_per_ingester):
+                    p = f"p{i % 100}"
+                    agg.ingest(make_event(provider=p, endpoint_category=p))
+            except BaseException as exc:  # noqa: BLE001 — we want everything
+                exceptions.append(exc)
+
+        def flusher() -> None:
+            try:
+                for _ in range(num_flushes):
+                    agg.flush()
+            except BaseException as exc:  # noqa: BLE001
+                exceptions.append(exc)
+
+        # Force aggressive thread switching so the race window is hit reliably
+        # on modern CPython where short Python operations rarely yield the GIL.
+        original_interval = sys.getswitchinterval()
+        sys.setswitchinterval(0.000001)
+        try:
+            threads = [threading.Thread(target=ingester) for _ in range(num_ingesters)]
+            threads.append(threading.Thread(target=flusher))
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30.0)
+        finally:
+            sys.setswitchinterval(original_interval)
+
+        assert not exceptions, f"unexpected exceptions: {exceptions!r}"
+        # Sanity: at least some threads ran to completion.
+        for t in threads:
+            assert not t.is_alive(), "a worker thread is still running"
+
+    def test_concurrent_correctness_no_lost_events(self):
+        """4 ingester threads each push 2000 events while a flusher pulls
+        windows concurrently. The total request_count summed across every
+        flushed summary, plus the request_count of the final drain, must
+        equal the total number of events ingested. Pre-fix this fails
+        because ``bucket.request_count += 1`` races across threads."""
+        agg = Aggregator()
+        iterations_per_ingester = 2000
+        num_ingesters = 4
+        total_expected = iterations_per_ingester * num_ingesters
+        flushed_total = 0
+        flushed_lock = threading.Lock()  # this lock is in the *test*, not the SUT
+        exceptions: list[BaseException] = []
+        ingest_done = threading.Event()
+
+        def ingester() -> None:
+            try:
+                for i in range(iterations_per_ingester):
+                    # Small key space so several events land in the same
+                    # bucket and the counter increment is contested.
+                    p = f"p{i % 3}"
+                    agg.ingest(make_event(provider=p, endpoint_category=p))
+            except BaseException as exc:  # noqa: BLE001
+                exceptions.append(exc)
+
+        def flusher() -> None:
+            nonlocal flushed_total
+            try:
+                while not ingest_done.is_set():
+                    summary = agg.flush()
+                    if summary is not None:
+                        n = sum(m.request_count for m in summary.metrics)
+                        with flushed_lock:
+                            flushed_total += n
+            except BaseException as exc:  # noqa: BLE001
+                exceptions.append(exc)
+
+        # Force aggressive GIL yields so the counter race fires reliably
+        # on modern CPython. Restored in finally.
+        original_switch = sys.getswitchinterval()
+        sys.setswitchinterval(0.000001)
+        try:
+            ingesters = [threading.Thread(target=ingester) for _ in range(num_ingesters)]
+            flusher_thread = threading.Thread(target=flusher)
+            flusher_thread.start()
+            for t in ingesters:
+                t.start()
+            for t in ingesters:
+                t.join(timeout=30.0)
+            ingest_done.set()
+            flusher_thread.join(timeout=10.0)
+        finally:
+            sys.setswitchinterval(original_switch)
+
+        # Final drain — anything ingested after the last flusher iteration.
+        final = agg.flush()
+        if final is not None:
+            flushed_total += sum(m.request_count for m in final.metrics)
+
+        assert not exceptions, f"unexpected exceptions: {exceptions!r}"
+        assert flushed_total == total_expected, (
+            f"lost events: flushed {flushed_total}, expected {total_expected}"
+        )
