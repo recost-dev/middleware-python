@@ -4,6 +4,7 @@ Tests for recost/_interceptor.py
 Tests urllib3 (via requests), httpx sync, httpx async interception.
 """
 
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -193,9 +194,6 @@ class TestSafety:
 # ---------------------------------------------------------------------------
 # Thread safety — install/uninstall race
 # ---------------------------------------------------------------------------
-
-import sys
-import threading
 
 
 class TestInstallUninstallRace:

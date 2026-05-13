@@ -2,6 +2,7 @@
 Tests for recost/_init.py
 """
 
+import sys
 import threading
 import time
 
@@ -78,8 +79,6 @@ class TestExcludePatterns:
 # Thread safety — init/dispose race
 # ---------------------------------------------------------------------------
 
-import sys
-
 
 class TestInitDisposeRace:
     """Regression tests for issue #4 — concurrent init() / dispose() must
@@ -108,7 +107,9 @@ class TestInitDisposeRace:
         # Disabled config avoids actually starting transport / timer threads
         # so the test stays fast and isolated. The lock invariant we are
         # testing does not depend on those resources being live.
-        config_factory = lambda: RecostConfig(enabled=False)
+        def config_factory() -> RecostConfig:
+            return RecostConfig(enabled=False)
+
         num_threads = 4
         iterations_per_thread = 20
         produced: list = []
