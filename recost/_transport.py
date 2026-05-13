@@ -296,6 +296,10 @@ class Transport:
         self._on_error = config.on_error
         self._last_flush_status: Optional[FlushStatus] = None
 
+        self._consecutive_auth_failures: int = 0
+        self._suspended: bool = False
+        self._auth_warned_stderr: bool = False
+
         self._local: Optional[_LocalTransport] = None
         if self.mode == "local":
             self._local = _LocalTransport(
@@ -315,7 +319,11 @@ class Transport:
         If the summary has more than max_buckets metrics (degenerate burst
         case), it is split into chunks and sent sequentially. The
         ``last_flush_status`` property reflects the final chunk's outcome.
+
+        No-op when the transport has been suspended (see 401 escalation).
         """
+        if self._suspended:
+            return
         if len(summary.metrics) > self._max_buckets:
             chunk_size = self._max_buckets
             for i in range(0, len(summary.metrics), chunk_size):
@@ -333,16 +341,18 @@ class Transport:
                 url = f"{self._base_url}/projects/{self._project_id}/telemetry"
                 result = _post_cloud(url, body, self._api_key, self._max_retries)
                 if 200 <= result.status < 300:
+                    self._consecutive_auth_failures = 0
                     self._last_flush_status = FlushStatus(
                         status="ok", window_size=window_size, timestamp=_now_ms(),
                     )
                     return
-                # Non-2xx — report and record error state. The next PR-3 commits
-                # add typed-error handling (401 escalation, 429 deferral) on top
-                # of this path.
-                self._report_rejection(result.status, window_size, result.request_id)
-                if result.error is not None and self._on_error is not None:
-                    self._on_error(result.error)
+                # Non-2xx — let _handle_cloud_result branch on 401 / 429 / other
+                # before falling back to the generic rejection path.
+                handled = self._handle_cloud_result(result, window_size)
+                if not handled:
+                    self._report_rejection(result.status, window_size, result.request_id)
+                    if result.error is not None and self._on_error is not None:
+                        self._on_error(result.error)
                 self._last_flush_status = FlushStatus(
                     status="error", window_size=window_size, timestamp=_now_ms(),
                 )
@@ -395,6 +405,42 @@ class Transport:
         logger.warning(msg)
         if self._on_error is not None:
             self._on_error(Exception(msg))
+
+    def _handle_cloud_result(self, result: _CloudResult, window_size: int) -> bool:
+        """Handle typed cloud responses (401 escalation, 429 deferral landing later).
+
+        Returns True if the response was fully handled (caller should skip the
+        generic rejection path); False to fall through to the default handler.
+        """
+        from ._types import RecostAuthError, RecostFatalAuthError
+
+        if result.status == 401:
+            self._consecutive_auth_failures += 1
+            if not self._auth_warned_stderr:
+                import sys
+                print(
+                    "Recost: API rejected key (401). Telemetry will be dropped. "
+                    "Check your api_key at https://recost.dev/dashboard/account.",
+                    file=sys.stderr,
+                )
+                self._auth_warned_stderr = True
+            if self._on_error is not None:
+                self._on_error(RecostAuthError(
+                    status=401,
+                    consecutive_failures=self._consecutive_auth_failures,
+                ))
+            if self._consecutive_auth_failures >= 5:
+                self._suspended = True
+                if self._on_error is not None:
+                    self._on_error(RecostFatalAuthError(
+                        status=401,
+                        consecutive_failures=self._consecutive_auth_failures,
+                    ))
+            return True
+
+        # 429 and other terminal cases — 429 lands in the next commit on top
+        # of this PR. For now any non-401 falls through to _report_rejection.
+        return False
 
     def dispose(self) -> None:
         """Clean up WebSocket thread / connections."""
