@@ -188,3 +188,22 @@ TransportMode = Literal["local", "cloud"]
 
 class RecostError(Exception):
     """Base class for typed SDK errors passed to on_error callbacks."""
+
+
+class RecostAuthError(RecostError):
+    """API rejected the configured api_key (401)."""
+
+    def __init__(self, status: int, consecutive_failures: int, message: str = "") -> None:
+        super().__init__(
+            message
+            or f"Recost API returned {status} (auth failed; {consecutive_failures} consecutive)"
+        )
+        self.status = status
+        self.consecutive_failures = consecutive_failures
+
+
+class RecostFatalAuthError(RecostAuthError):
+    """Cloud transport suspended after N consecutive auth failures.
+
+    Subsequent send() calls are no-ops until handle.reinit_after_fork() or process restart.
+    """

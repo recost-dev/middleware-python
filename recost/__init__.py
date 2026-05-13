@@ -12,6 +12,8 @@ from ._types import (
     ProviderDef,
     RawEvent,
     RecostError,
+    RecostAuthError,
+    RecostFatalAuthError,
     TransportMode,
     WindowSummary,
 )
@@ -29,6 +31,8 @@ __all__ = [
     "ProviderDef",
     "RecostConfig",
     "RecostError",
+    "RecostAuthError",
+    "RecostFatalAuthError",
     "TransportMode",
     "FlushStatus",
     "ProviderRegistry",
