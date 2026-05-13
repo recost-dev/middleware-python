@@ -14,7 +14,7 @@ from __future__ import annotations
 import warnings
 from typing import Any, Optional
 
-from .._init import init
+from .._init import init, RecostHandle
 from .._types import RecostConfig
 
 try:
@@ -29,7 +29,7 @@ try:
             config: Optional[RecostConfig] = None,
             **kwargs: Any,
         ) -> None:
-            self._handle = None
+            self._handle: Optional[RecostHandle] = None
             if app is not None:
                 self.init_app(app, config, **kwargs)
 

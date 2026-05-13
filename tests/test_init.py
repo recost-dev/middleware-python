@@ -7,12 +7,10 @@ import subprocess
 import sys
 import textwrap
 import threading
-import time
 
-import pytest
 
 from recost._init import init
-from recost._interceptor import is_installed, uninstall
+from recost._interceptor import is_installed
 from recost._types import RecostConfig
 
 
@@ -29,7 +27,7 @@ class TestInit:
         handle.dispose()
 
     def test_double_init_disposes_first(self):
-        h1 = init(RecostConfig())
+        init(RecostConfig())
         assert is_installed()
         h2 = init(RecostConfig())
         assert is_installed()

@@ -20,7 +20,6 @@ import urllib.request
 from dataclasses import replace
 from typing import Optional, Tuple
 
-from ._aggregator import MAX_BUCKETS
 from ._types import FlushStatus, RecostConfig, TransportMode, WindowSummary
 
 logger = logging.getLogger("recost")
@@ -120,7 +119,7 @@ class _LocalTransport:
         self._ready = threading.Event()
 
         try:
-            import websockets  # type: ignore[import-untyped]  # noqa: F401
+            import websockets  # noqa: F401
             self._has_websockets = True
         except ImportError:
             self._has_websockets = False
@@ -161,7 +160,7 @@ class _LocalTransport:
                 pass
 
     async def _ws_loop(self) -> None:
-        import websockets  # type: ignore[import-untyped]
+        import websockets
 
         url = f"ws://127.0.0.1:{self._port}"
         assert self._queue is not None

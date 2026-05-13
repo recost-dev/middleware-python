@@ -11,7 +11,7 @@ Usage:
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from .._init import init
 from .._types import RecostConfig
@@ -31,7 +31,7 @@ try:
             self._handle = init(config)
 
         async def dispatch(self, request: Request, call_next: Any) -> Response:
-            return await call_next(request)
+            return cast(Response, await call_next(request))
 
 except ImportError:
     # starlette not installed — provide a stub that raises on use

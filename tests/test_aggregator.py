@@ -252,7 +252,6 @@ class TestWindowTimestamps:
         agg.ingest(make_event())
         before = datetime.now(timezone.utc)
         summary = agg.flush()
-        after = datetime.now(timezone.utc)
         assert summary is not None
         window_end = datetime.fromisoformat(summary.window_end.replace("Z", "+00:00"))
         # Allow some slack

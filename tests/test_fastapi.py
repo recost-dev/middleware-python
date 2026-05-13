@@ -2,8 +2,6 @@
 Tests for recost/frameworks/fastapi.py
 """
 
-import pytest
-
 from recost._interceptor import is_installed, uninstall
 from recost._types import RecostConfig
 

@@ -4,10 +4,8 @@ Scaffold smoke tests — verifies the package exports resolve without errors.
 
 from recost import (
     Aggregator,
-    BUILTIN_PROVIDERS,
     ProviderRegistry,
     is_installed,
-    uninstall,
 )
 from recost._transport import Transport
 from recost._types import RecostConfig

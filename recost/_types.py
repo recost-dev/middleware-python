@@ -10,7 +10,7 @@ generated the telemetry.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, List, Literal, Optional
+from typing import Any, Callable, List, Literal, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +42,7 @@ class RawEvent:
     host: str
     path: str
     status_code: int
-    latency_ms: int
+    latency_ms: float
     request_bytes: int
     response_bytes: int
     provider: Optional[str] = None
@@ -63,14 +63,14 @@ class MetricEntry:
     method: str
     request_count: int
     error_count: int
-    total_latency_ms: int
-    p50_latency_ms: int
-    p95_latency_ms: int
+    total_latency_ms: float
+    p50_latency_ms: float
+    p95_latency_ms: float
     total_request_bytes: int
     total_response_bytes: int
     estimated_cost_cents: float
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to camelCase dict matching the Node SDK / API contract."""
         return {
             "provider": self.provider,
@@ -103,7 +103,7 @@ class WindowSummary:
     window_end: str
     metrics: List[MetricEntry] = field(default_factory=list)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to camelCase dict matching the API contract."""
         return {
             "projectId": self.project_id,

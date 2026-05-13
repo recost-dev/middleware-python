@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from recost._transport import Transport, _LocalTransport, _post_cloud
+from recost._transport import Transport, _LocalTransport
 from recost._types import RecostConfig, MetricEntry, WindowSummary
 
 

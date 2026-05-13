@@ -40,7 +40,7 @@ class _Bucket:
     method: str
     request_count: int = 0
     error_count: int = 0
-    latencies: List[int] = field(default_factory=list)
+    latencies: List[float] = field(default_factory=list)
     total_request_bytes: int = 0
     total_response_bytes: int = 0
     estimated_cost_cents: float = 0.0
@@ -50,9 +50,9 @@ class _Bucket:
 # Percentile helper
 # ---------------------------------------------------------------------------
 
-def _compute_percentile(sorted_values: List[int], p: float) -> int:
+def _compute_percentile(sorted_values: List[float], p: float) -> float:
     if len(sorted_values) == 0:
-        return 0
+        return 0.0
     idx = math.ceil(len(sorted_values) * p) - 1
     idx = max(0, min(idx, len(sorted_values) - 1))
     return sorted_values[idx]
