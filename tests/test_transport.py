@@ -617,3 +617,38 @@ def test_429_does_not_increment_auth_counter(mock_http_server_429_retry_after_2)
     )
     transport.send(summary)
     assert transport._consecutive_auth_failures == 0
+
+
+# ---------------------------------------------------------------------------
+# Self-instrumentation (#9) — cloud transport must not trigger urllib3 patch
+# ---------------------------------------------------------------------------
+
+
+class TestSelfInstrumentation:
+    """The cloud transport uses urllib.request (stdlib) so the interceptor's
+    urllib3 patch never sees its own POSTs. If a future change starts using
+    requests/httpx for the cloud POST, the SDK would loop on itself —
+    every flush would generate one more event to flush."""
+
+    def test_cloud_flush_does_not_trigger_urllib3_patch(self, cloud_server):
+        from recost._interceptor import install, uninstall
+        from recost._transport import _post_cloud
+        events: list = []
+        base_url, _ = cloud_server
+        install(events.append)
+        try:
+            result = _post_cloud(
+                url=f"{base_url}/projects/proj/telemetry",
+                body='{"ping": 1}',
+                api_key="rc-test",
+                max_retries=0,
+            )
+            assert 200 <= result.status < 300, (
+                f"cloud_server should return 202, got {result.status}"
+            )
+            assert events == [], (
+                f"cloud transport leaked into interceptor — captured {len(events)} "
+                f"event(s); the urllib.request-based path must not be patched"
+            )
+        finally:
+            uninstall()
