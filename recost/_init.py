@@ -29,6 +29,7 @@ class RecostHandle:
         transport: Optional[Transport],
         final_flush: Optional[Callable[[], None]] = None,
         shutdown_flush_timeout_ms: int = 3_000,
+        rebuild: Optional[Callable[["RecostHandle"], None]] = None,
     ) -> None:
         self._timer_stop = timer_stop
         self._timer_thread = timer_thread
@@ -37,6 +38,7 @@ class RecostHandle:
         self._shutdown_flush_timeout_ms = shutdown_flush_timeout_ms
         self._disposed = False
         self.pid: int = os.getpid()
+        self._rebuild = rebuild
         # Set by init() when auto_shutdown_handlers=True. Cleared in
         # dispose() so we don't keep a dangling atexit registration after
         # explicit teardown — without this, a long-lived process that
@@ -49,6 +51,19 @@ class RecostHandle:
         if self._transport is None:
             return None
         return self._transport.last_flush_status
+
+    def reinit_after_fork(self) -> None:
+        """Recreate timer thread + transport in the current PID. Idempotent within a PID."""
+        if self._rebuild is None:
+            return
+        if (
+            self.pid == os.getpid()
+            and self._timer_thread is not None
+            and self._timer_thread.is_alive()
+        ):
+            return  # No fork has happened; nothing to rebuild
+        self._rebuild(self)
+        self.pid = os.getpid()
 
     def dispose(self) -> None:
         """Stop intercepting, flush remaining events, and close transport connections.
@@ -94,6 +109,43 @@ class RecostHandle:
             global _handle
             if _handle is self:
                 _handle = None
+
+
+def _make_rebuild(
+    config: RecostConfig,
+    aggregator: Aggregator,
+    flush_interval_seconds: float,
+) -> Callable[[RecostHandle], None]:
+    """Return a rebuild closure that recreates the transport and timer thread.
+
+    Used by RecostHandle.reinit_after_fork() to restore the SDK in a forked
+    child process. The closure intentionally creates its own simpler timer
+    loop because the parent's _deferral cell does not survive fork.
+    """
+
+    def rebuild(handle: RecostHandle) -> None:
+        # Replace transport (new event loop, new WS thread)
+        new_transport = Transport(config)
+        handle._transport = new_transport
+        # Replace flush timer
+        new_stop = threading.Event()
+        handle._timer_stop = new_stop
+
+        def _loop() -> None:
+            while not new_stop.wait(timeout=flush_interval_seconds):
+                try:
+                    summary = aggregator.flush()
+                    if summary is not None:
+                        new_transport.send(summary)
+                except Exception as err:
+                    if config.on_error is not None:
+                        config.on_error(err)
+
+        t = threading.Thread(target=_loop, daemon=True)
+        t.start()
+        handle._timer_thread = t
+
+    return rebuild
 
 
 # Module-level handle so a second init() call disposes the first.
@@ -244,12 +296,14 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
                 elif debug:
                     print(f"[recost] flush error: {err}", file=sys.stderr)
 
+        rebuild = _make_rebuild(config, aggregator, flush_interval_seconds)
         handle = RecostHandle(
             timer_stop=stop_event,
             timer_thread=timer_thread,
             transport=transport,
             final_flush=_final_flush,
             shutdown_flush_timeout_ms=config.shutdown_flush_timeout_ms,
+            rebuild=rebuild,
         )
         _handle = handle
 
