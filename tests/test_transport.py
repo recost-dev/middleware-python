@@ -460,3 +460,45 @@ class TestDisposeDuringConnect:
             )
         finally:
             server.close()
+
+
+# ---------------------------------------------------------------------------
+# _CloudResult / _post_cloud tests
+# ---------------------------------------------------------------------------
+
+
+def test_post_cloud_returns_status_on_2xx(mock_http_server_200) -> None:  # type: ignore[no-untyped-def]
+    from recost._transport import _post_cloud
+    result = _post_cloud(
+        url=mock_http_server_200.url,
+        body='{"ping": 1}',
+        api_key="rc-test",
+        max_retries=0,
+    )
+    assert result.status == 200
+    assert result.retry_after_ms is None
+    assert result.error is None
+
+
+def test_post_cloud_returns_401_status_without_raising(mock_http_server_401) -> None:  # type: ignore[no-untyped-def]
+    from recost._transport import _post_cloud
+    result = _post_cloud(
+        url=mock_http_server_401.url,
+        body='{"ping": 1}',
+        api_key="rc-bad",
+        max_retries=0,
+    )
+    assert result.status == 401
+    assert result.retry_after_ms is None
+
+
+def test_post_cloud_parses_retry_after_seconds_on_429(mock_http_server_429_retry_after_2) -> None:  # type: ignore[no-untyped-def]
+    from recost._transport import _post_cloud
+    result = _post_cloud(
+        url=mock_http_server_429_retry_after_2.url,
+        body='{"ping": 1}',
+        api_key="rc-ok",
+        max_retries=0,
+    )
+    assert result.status == 429
+    assert result.retry_after_ms == 2000

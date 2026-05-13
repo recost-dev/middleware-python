@@ -17,8 +17,10 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import replace
-from typing import Optional, Tuple
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import Optional
 
 from ._types import FlushStatus, RecostConfig, TransportMode, WindowSummary
 
@@ -29,24 +31,48 @@ logger = logging.getLogger("recost")
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class _CloudResult:
+    status: int  # 0 means network/connection error (no HTTP response received)
+    retry_after_ms: Optional[int] = None
+    request_id: Optional[str] = None
+    error: Optional[Exception] = None
+
+
+def _parse_retry_after(value: str) -> int:
+    """Returns retry delay in milliseconds. Falls back to 60_000 on parse failure."""
+    if not value:
+        return 60_000
+    value = value.strip()
+    try:
+        secs = int(value)
+        return max(0, secs * 1000)
+    except ValueError:
+        pass
+    try:
+        dt = parsedate_to_datetime(value)
+        if dt is None:
+            return 60_000
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = (dt - datetime.now(timezone.utc)).total_seconds()
+        return max(0, int(delta * 1000))
+    except (TypeError, ValueError):
+        return 60_000
+
+
 def _post_cloud(
     url: str,
     body: str,
     api_key: str,
     max_retries: int,
-) -> Tuple[bool, int, Optional[str]]:
-    """POST a JSON body to the cloud API with retry.
+) -> _CloudResult:
+    """POST a JSON body with retry. Returns a structured result; never raises.
 
-    Returns (ok, status, request_id):
-      - (True, status, req_id)  on 2xx
-      - (False, status, req_id) on 4xx (caller decides how to surface)
     The response body is intentionally never read — 4xx bodies can echo
     field-level validation detail that hints at project/key shape, and we
     don't want any of that landing in user logs. ``x-request-id`` is the
-    one piece of response metadata the caller is allowed to log.
-
-    Raises the last exception when retries on 5xx / network errors are
-    exhausted.
+    one piece of response metadata captured for caller logging.
     """
     last_error: Optional[Exception] = None
 
@@ -66,15 +92,21 @@ def _post_cloud(
             status = resp.getcode() or 0
             request_id = resp.headers.get("x-request-id") if resp.headers else None
             if 200 <= status < 300:
-                return True, status, request_id
-            # 4xx errors are not retriable
+                return _CloudResult(status=status, request_id=request_id)
             if 400 <= status < 500:
-                return False, status, request_id
+                return _CloudResult(status=status, request_id=request_id)
             last_error = Exception(f"HTTP {status}")
         except urllib.error.HTTPError as e:
             request_id = e.headers.get("x-request-id") if e.headers else None
+            if e.code == 429:
+                retry_after_ms = _parse_retry_after(
+                    e.headers.get("Retry-After", "") if e.headers else ""
+                )
+                return _CloudResult(
+                    status=429, retry_after_ms=retry_after_ms, request_id=request_id,
+                )
             if 400 <= e.code < 500:
-                return False, e.code, request_id
+                return _CloudResult(status=e.code, request_id=request_id)
             last_error = e
         except Exception as e:
             last_error = e
@@ -82,9 +114,7 @@ def _post_cloud(
         if attempt < max_retries:
             time.sleep(min(1.0 * (2 ** attempt), 10.0))
 
-    if last_error is not None:
-        raise last_error
-    return False, 0, None
+    return _CloudResult(status=0, error=last_error)
 
 
 # ---------------------------------------------------------------------------
@@ -301,17 +331,20 @@ class Transport:
         try:
             if self.mode == "cloud":
                 url = f"{self._base_url}/projects/{self._project_id}/telemetry"
-                ok, status, request_id = _post_cloud(
-                    url, body, self._api_key, self._max_retries,
-                )
-                if not ok:
-                    self._report_rejection(status, window_size, request_id)
+                result = _post_cloud(url, body, self._api_key, self._max_retries)
+                if 200 <= result.status < 300:
                     self._last_flush_status = FlushStatus(
-                        status="error", window_size=window_size, timestamp=_now_ms(),
+                        status="ok", window_size=window_size, timestamp=_now_ms(),
                     )
                     return
+                # Non-2xx — report and record error state. The next PR-3 commits
+                # add typed-error handling (401 escalation, 429 deferral) on top
+                # of this path.
+                self._report_rejection(result.status, window_size, result.request_id)
+                if result.error is not None and self._on_error is not None:
+                    self._on_error(result.error)
                 self._last_flush_status = FlushStatus(
-                    status="ok", window_size=window_size, timestamp=_now_ms(),
+                    status="error", window_size=window_size, timestamp=_now_ms(),
                 )
                 return
 
