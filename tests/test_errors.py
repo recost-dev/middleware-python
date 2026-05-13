@@ -26,3 +26,12 @@ def test_fatal_auth_error_is_an_auth_error() -> None:
     err = RecostFatalAuthError(status=401, consecutive_failures=5)
     assert isinstance(err, RecostAuthError)
     assert err.consecutive_failures == 5
+
+
+def test_rate_limit_error_carries_retry_after() -> None:
+    from recost import RecostError, RecostRateLimitError
+    err = RecostRateLimitError(retry_after_ms=2500, endpoint="/projects/p_1/telemetry")
+    assert isinstance(err, RecostError)
+    assert err.retry_after_ms == 2500
+    assert err.endpoint == "/projects/p_1/telemetry"
+    assert "2500" in str(err)

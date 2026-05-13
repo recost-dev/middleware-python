@@ -14,6 +14,7 @@ from ._types import (
     RecostError,
     RecostAuthError,
     RecostFatalAuthError,
+    RecostRateLimitError,
     TransportMode,
     WindowSummary,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "RecostError",
     "RecostAuthError",
     "RecostFatalAuthError",
+    "RecostRateLimitError",
     "TransportMode",
     "FlushStatus",
     "ProviderRegistry",

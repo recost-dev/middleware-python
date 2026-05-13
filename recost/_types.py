@@ -207,3 +207,12 @@ class RecostFatalAuthError(RecostAuthError):
 
     Subsequent send() calls are no-ops until handle.reinit_after_fork() or process restart.
     """
+
+
+class RecostRateLimitError(RecostError):
+    """API returned 429. The flush has been deferred, not dropped."""
+
+    def __init__(self, retry_after_ms: int, endpoint: str) -> None:
+        super().__init__(f"Recost API rate-limited (retry in {retry_after_ms}ms)")
+        self.retry_after_ms = retry_after_ms
+        self.endpoint = endpoint
