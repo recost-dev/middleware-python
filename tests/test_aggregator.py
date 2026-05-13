@@ -438,3 +438,67 @@ class TestThreadSafety:
         # Sanity: at least some threads ran to completion.
         for t in threads:
             assert not t.is_alive(), "a worker thread is still running"
+
+    def test_concurrent_correctness_no_lost_events(self):
+        """4 ingester threads each push 2000 events while a flusher pulls
+        windows concurrently. The total request_count summed across every
+        flushed summary, plus the request_count of the final drain, must
+        equal the total number of events ingested. Pre-fix this fails
+        because ``bucket.request_count += 1`` races across threads."""
+        agg = Aggregator()
+        iterations_per_ingester = 2000
+        num_ingesters = 4
+        total_expected = iterations_per_ingester * num_ingesters
+        flushed_total = 0
+        flushed_lock = threading.Lock()  # this lock is in the *test*, not the SUT
+        exceptions: list[BaseException] = []
+        ingest_done = threading.Event()
+
+        def ingester() -> None:
+            try:
+                for i in range(iterations_per_ingester):
+                    # Small key space so several events land in the same
+                    # bucket and the counter increment is contested.
+                    p = f"p{i % 3}"
+                    agg.ingest(make_event(provider=p, endpoint_category=p))
+            except BaseException as exc:  # noqa: BLE001
+                exceptions.append(exc)
+
+        def flusher() -> None:
+            nonlocal flushed_total
+            try:
+                while not ingest_done.is_set():
+                    summary = agg.flush()
+                    if summary is not None:
+                        n = sum(m.request_count for m in summary.metrics)
+                        with flushed_lock:
+                            flushed_total += n
+            except BaseException as exc:  # noqa: BLE001
+                exceptions.append(exc)
+
+        # Force aggressive GIL yields so the counter race fires reliably
+        # on modern CPython. Restored in finally.
+        original_switch = sys.getswitchinterval()
+        sys.setswitchinterval(0.000001)
+        try:
+            ingesters = [threading.Thread(target=ingester) for _ in range(num_ingesters)]
+            flusher_thread = threading.Thread(target=flusher)
+            flusher_thread.start()
+            for t in ingesters:
+                t.start()
+            for t in ingesters:
+                t.join(timeout=30.0)
+            ingest_done.set()
+            flusher_thread.join(timeout=10.0)
+        finally:
+            sys.setswitchinterval(original_switch)
+
+        # Final drain — anything ingested after the last flusher iteration.
+        final = agg.flush()
+        if final is not None:
+            flushed_total += sum(m.request_count for m in final.metrics)
+
+        assert not exceptions, f"unexpected exceptions: {exceptions!r}"
+        assert flushed_total == total_expected, (
+            f"lost events: flushed {flushed_total}, expected {total_expected}"
+        )
