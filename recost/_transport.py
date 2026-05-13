@@ -1,7 +1,7 @@
 """
 Transport — delivers WindowSummary payloads to either:
   - api.recost.dev (cloud mode) via HTTPS POST with exponential-backoff retry, or
-  - the ReCost VS Code extension (local mode) via WebSocket on localhost.
+  - the Recost VS Code extension (local mode) via WebSocket on localhost.
 
 Uses urllib.request (stdlib) for cloud transport to avoid self-instrumentation
 (the interceptor patches urllib3, not urllib.request).

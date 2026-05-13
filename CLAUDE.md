@@ -1,6 +1,6 @@
 # recost — Python Middleware
 
-Python SDK that automatically tracks outbound HTTP API calls, matches them against a built-in provider registry, aggregates events into time-windowed summaries, and ships telemetry to the ReCost cloud API or VS Code extension.
+Python SDK that automatically tracks outbound HTTP API calls, matches them against a built-in provider registry, aggregates events into time-windowed summaries, and ships telemetry to the Recost cloud API or VS Code extension.
 
 ## Tech Stack
 

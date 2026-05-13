@@ -80,7 +80,7 @@ _handle: Optional[RecostHandle] = None
 
 def init(config: Optional[RecostConfig] = None) -> RecostHandle:
     """
-    Initialize the ReCost SDK.
+    Initialize the Recost SDK.
 
     - Patches urllib3, httpx, and aiohttp.
     - Starts a flush interval that sends aggregated telemetry.
