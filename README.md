@@ -81,18 +81,22 @@ app.add_middleware(RecostMiddleware, api_key="...", project_id="...")
 
 ```python
 from flask import Flask
-from recost.frameworks.flask import ReCost
+from recost.frameworks.flask import RecostExtension
 
 app = Flask(__name__)
-ReCost(app, api_key="...", project_id="...")
+RecostExtension(app, api_key="...", project_id="...")
 ```
 
 Or using the `init_app` pattern:
 
 ```python
-recost = ReCost()
-recost.init_app(app, api_key="...", project_id="...")
+ext = RecostExtension()
+ext.init_app(app, api_key="...", project_id="...")
 ```
+
+> **Note:** the old class name `ReCost` is still importable as a deprecated
+> alias and will continue to work for one release with a `DeprecationWarning`.
+> Migrate to `RecostExtension`.
 
 ## Configuration
 
@@ -103,8 +107,10 @@ All fields are optional. Pass them as keyword arguments or via a `RecostConfig` 
 | `api_key` | `str` | — | Recost API key (`rc-...`). If omitted, runs in local mode. |
 | `project_id` | `str` | — | Recost project ID. Required in cloud mode. |
 | `environment` | `str` | `"development"` | Environment tag attached to all telemetry. |
-| `flush_interval` | `float` | `30.0` | Seconds between automatic flushes. |
+| `flush_interval_ms` | `int` | `30000` | Milliseconds between automatic aggregator flushes. |
+| `flush_interval` | `float` | — | **Deprecated.** Legacy seconds-based flush interval. If set, takes precedence over `flush_interval_ms` and emits a `DeprecationWarning`. Will be removed in a future release. |
 | `max_batch_size` | `int` | `100` | Early-flush threshold (number of events). |
+| `max_buckets` | `int` | `2000` | Maximum unique (provider, endpoint, method) triplets per window. Crossing this triggers an early flush. |
 | `local_port` | `int` | `9847` | WebSocket port for the VS Code extension. |
 | `debug` | `bool` | `False` | Log telemetry activity to stderr. |
 | `enabled` | `bool` | `True` | Master kill switch — set `False` to disable entirely. |
@@ -112,7 +118,8 @@ All fields are optional. Pass them as keyword arguments or via a `RecostConfig` 
 | `exclude_patterns` | `list[str]` | `[]` | URL substrings — matching requests are silently dropped. |
 | `base_url` | `str` | `"https://api.recost.dev"` | Override for self-hosted deployments. |
 | `max_retries` | `int` | `3` | Retry attempts for failed cloud flushes. |
-| `on_error` | `Callable` | — | Called on internal SDK errors. |
+| `shutdown_flush_timeout_ms` | `int` | `3000` | How long `dispose()` waits for the final flush to complete before closing the transport. |
+| `on_error` | `Callable[[Exception], None]` | — | Called on internal SDK errors. |
 
 ### Custom providers
 

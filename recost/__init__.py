@@ -1,8 +1,8 @@
 """
-recost — Python SDK for ReCost.
+recost — Python SDK for Recost.
 
 Tracks outbound HTTP API calls and reports cost, latency, and usage patterns
-to the ReCost dashboard or your local VS Code extension.
+to the Recost dashboard or your local VS Code extension.
 """
 
 from ._types import (

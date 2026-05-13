@@ -22,7 +22,7 @@ try:
     from starlette.responses import Response
 
     class RecostMiddleware(BaseHTTPMiddleware):
-        """ASGI middleware that initializes ReCost telemetry."""
+        """ASGI middleware that initializes Recost telemetry."""
 
         def __init__(self, app: Any, config: Optional[RecostConfig] = None, **kwargs: Any) -> None:
             super().__init__(app)
