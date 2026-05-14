@@ -21,6 +21,11 @@ from recost._types import RawEvent
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/notfound":
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         self.send_response(200)
         self.send_header("Content-Length", "2")
         self.end_headers()
@@ -46,6 +51,20 @@ def test_server():
     thread.start()
     yield f"http://127.0.0.1:{port}"
     server.shutdown()
+
+
+def _find_free_port() -> int:
+    """Bind an ephemeral TCP socket and immediately release it.
+
+    The returned port is very likely free for ~µs after this call, which is
+    enough for a single aiohttp connect attempt that we *want* to fail.
+    """
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 
 # ---------------------------------------------------------------------------
@@ -360,3 +379,168 @@ def test_httpx_streaming_content_not_materialized(mock_http_server_200) -> None:
         assert ev.request_bytes == 0
     finally:
         uninstall()
+
+
+# ---------------------------------------------------------------------------
+# Privacy contract (#9 + #19)
+# ---------------------------------------------------------------------------
+
+
+class TestPrivacy:
+    """The README promises that headers and bodies are never captured and that
+    query strings are stripped. These tests enforce that contract directly."""
+
+    def test_raw_event_has_no_headers_field(self):
+        """RawEvent must not contain any header-shaped field, now or later."""
+        import dataclasses
+        field_names = {f.name for f in dataclasses.fields(RawEvent)}
+        for forbidden in ("headers", "request_headers", "response_headers"):
+            assert forbidden not in field_names, (
+                f"RawEvent has a forbidden field {forbidden!r}; "
+                f"adding header capture would break the privacy contract"
+            )
+
+    def test_authorization_header_never_leaves_a_trace(self, mock_http_server_200):
+        """A request with Authorization: Bearer <secret> must not leak that
+        secret into any captured field."""
+        import dataclasses
+        import requests as _requests
+        events: list[RawEvent] = []
+        install(events.append)
+        try:
+            _requests.get(
+                mock_http_server_200.url,
+                headers={"Authorization": "Bearer secret123"},
+            )
+            assert len(events) >= 1
+            for value in dataclasses.asdict(events[-1]).values():
+                assert "secret123" not in str(value), (
+                    f"Authorization secret leaked into a RawEvent field: {value!r}"
+                )
+        finally:
+            uninstall()
+
+    def test_query_string_never_leaves_a_trace(self, mock_http_server_200):
+        """A request with ?api_key=<secret> must not leak the secret into any
+        captured field — url should be stripped of the query, and no other
+        field should carry the raw query string."""
+        import dataclasses
+        import requests as _requests
+        events: list[RawEvent] = []
+        install(events.append)
+        try:
+            _requests.get(mock_http_server_200.url + "?api_key=topsecret")
+            assert len(events) >= 1
+            for value in dataclasses.asdict(events[-1]).values():
+                assert "topsecret" not in str(value), (
+                    f"Query string secret leaked into a RawEvent field: {value!r}"
+                )
+        finally:
+            uninstall()
+
+    def test_strip_query_handles_encoded_question_mark(self):
+        """A path with %3F before the real ? must keep the encoded %3F
+        intact and strip only the real query string."""
+        from recost._interceptor import _strip_query
+        result = _strip_query("https://api.example.com/p%3Fath?real=secret")
+        assert result == "https://api.example.com/p%3Fath"
+        assert "secret" not in result
+
+    def test_strip_query_drops_fragment(self):
+        """URL fragments are dropped along with the query string — both can
+        carry sensitive context."""
+        from recost._interceptor import _strip_query
+        assert _strip_query("https://h/p#frag") == "https://h/p"
+
+    def test_strip_query_drops_userinfo(self):
+        """URL userinfo (user:pass@) is a credential leak — it must not
+        survive _strip_query."""
+        from recost._interceptor import _strip_query
+        result = _strip_query("https://user:pass@h/p")
+        assert result == "https://h/p"
+        assert "user" not in result
+        assert "pass" not in result
+
+
+# ---------------------------------------------------------------------------
+# Generic aiohttp interception (#9)
+# ---------------------------------------------------------------------------
+
+
+class TestAiohttp:
+    """Mirrors TestUrllib3 / TestHttpxAsync. Wave A's aiohttp tests cover only
+    body sizing; these pin success, non-2xx, exception, and double-count."""
+
+    @pytest.mark.asyncio
+    async def test_captures_get(self, test_server):
+        events: list[RawEvent] = []
+        install(events.append)
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{test_server}/aio") as resp:
+                    assert resp.status == 200
+                    await resp.read()
+            assert len(events) == 1, f"expected 1 event, got {len(events)}"
+            event = events[0]
+            assert event.method == "GET"
+            assert "/aio" in event.url
+            assert event.status_code == 200
+            assert event.latency_ms >= 0
+        finally:
+            uninstall()
+
+    @pytest.mark.asyncio
+    async def test_captures_non_2xx_marks_error(self, test_server):
+        events: list[RawEvent] = []
+        install(events.append)
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{test_server}/notfound") as resp:
+                    assert resp.status == 404
+                    await resp.read()
+            assert len(events) == 1
+            assert events[0].status_code == 404
+            assert events[0].error is True
+        finally:
+            uninstall()
+
+    @pytest.mark.asyncio
+    async def test_exception_path_captures_status_zero(self):
+        """Pointing aiohttp at a closed port raises ClientError and we still
+        capture an event with status_code=0, error=True."""
+        events: list[RawEvent] = []
+        install(events.append)
+        try:
+            import aiohttp
+            dead_port = _find_free_port()
+            url = f"http://127.0.0.1:{dead_port}/x"
+            with pytest.raises(aiohttp.ClientError):
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url) as resp:
+                        await resp.read()
+            assert len(events) == 1
+            assert events[0].status_code == 0
+            assert events[0].error is True
+        finally:
+            uninstall()
+
+    @pytest.mark.asyncio
+    async def test_no_double_count_via_internal_connector(self, test_server):
+        """One session.get must produce exactly one event, even though
+        aiohttp's connector internals can use a DNS thread pool that hops
+        OS threads. The dual task+thread reentrancy guard covers this."""
+        events: list[RawEvent] = []
+        install(events.append)
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{test_server}/dc") as resp:
+                    await resp.read()
+            assert len(events) == 1, (
+                f"expected 1 event, got {len(events)} — possible double-count "
+                f"regression in the reentrancy guard"
+            )
+        finally:
+            uninstall()

@@ -381,3 +381,72 @@ def test_init_accepts_none_api_key() -> None:
     from recost import init, RecostConfig
     handle = init(RecostConfig(api_key=None))
     handle.dispose()
+
+
+def test_legacy_flush_interval_emits_deprecation_warning() -> None:
+    """The legacy seconds-based flush_interval must still work but emit a
+    DeprecationWarning at init() time."""
+    import pytest as _pytest
+    from recost import init, RecostConfig
+    with _pytest.warns(DeprecationWarning, match="flush_interval is deprecated"):
+        handle = init(RecostConfig(flush_interval=60.0, enabled=True))
+    try:
+        # The timer thread must still be alive — the legacy value was honored.
+        assert handle._timer_thread is not None
+        assert handle._timer_thread.is_alive()
+    finally:
+        handle.dispose()
+
+
+def test_dispose_prevents_further_flushes(monkeypatch) -> None:
+    """After dispose(), no new flush may be invoked on the transport — both
+    the periodic timer and the atexit hook must be quiesced."""
+    import time as _time
+    from recost import init, RecostConfig
+    from recost._transport import Transport
+
+    send_count = [0]
+    real_send = Transport.send
+
+    def _counting_send(self, summary):
+        send_count[0] += 1
+        # Don't actually POST — base_url points at a port that isn't listening
+        return real_send(self, summary)
+
+    monkeypatch.setattr(Transport, "send", _counting_send)
+
+    handle = init(RecostConfig(
+        enabled=True,
+        api_key="rc-test",
+        project_id="p",
+        base_url="http://127.0.0.1:1",
+        flush_interval_ms=200,
+        auto_shutdown_handlers=False,
+    ))
+
+    from recost._types import RawEvent
+    from recost._interceptor import _callback
+    assert _callback is not None
+    _callback(RawEvent(
+        method="GET",
+        url="https://api.openai.com/v1/chat/completions",
+        host="api.openai.com",
+        path="/v1/chat/completions",
+        status_code=200,
+        latency_ms=10,
+        request_bytes=0,
+        response_bytes=0,
+        timestamp="2026-05-13T00:00:00Z",
+    ))
+
+    _time.sleep(0.5)
+    pre_dispose = send_count[0]
+
+    handle.dispose()
+    send_count[0] = 0
+    _time.sleep(0.6)
+
+    assert send_count[0] == 0, (
+        f"send was called {send_count[0]} times after dispose() — "
+        f"timer was {pre_dispose} pre-dispose; dispose did not stop the loop"
+    )

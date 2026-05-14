@@ -74,12 +74,23 @@ def _exit_interceptor(token: Token[bool]) -> None:
 
 
 def _strip_query(url: str) -> str:
-    """Strip query string from URL."""
+    """Strip query string and fragment from URL, preserving scheme/netloc/path.
+
+    Uses urlparse so encoded characters in the path (%3F, %23, etc.) and
+    URL fragments cannot leak into event.url. The substring-based
+    predecessor was correct for canonical URLs but fragile for any input
+    where a `?` or `#` could appear in a non-query position, and it did
+    not drop userinfo from the netloc.
+    """
     try:
-        idx = url.find("?")
-        if idx != -1:
-            return url[:idx]
-        return url
+        parsed = urlparse(url)
+        if not parsed.scheme and not parsed.netloc:
+            return url
+        netloc = parsed.hostname or ""
+        if parsed.port:
+            netloc = f"{netloc}:{parsed.port}"
+        path = parsed.path or ""
+        return f"{parsed.scheme}://{netloc}{path}"
     except Exception:
         return url
 
