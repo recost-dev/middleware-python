@@ -620,6 +620,100 @@ def test_429_does_not_increment_auth_counter(mock_http_server_429_retry_after_2)
 
 
 # ---------------------------------------------------------------------------
+# Self-instrumentation (#9) — cloud transport must not trigger urllib3 patch
+# ---------------------------------------------------------------------------
+
+
+class TestSelfInstrumentation:
+    """The cloud transport uses urllib.request (stdlib) so the interceptor's
+    urllib3 patch never sees its own POSTs. If a future change starts using
+    requests/httpx for the cloud POST, the SDK would loop on itself —
+    every flush would generate one more event to flush."""
+
+    def test_cloud_flush_does_not_trigger_urllib3_patch(self, cloud_server):
+        from recost._interceptor import install, uninstall
+        from recost._transport import _post_cloud
+        events: list = []
+        base_url, _ = cloud_server
+        install(events.append)
+        try:
+            result = _post_cloud(
+                url=f"{base_url}/projects/proj/telemetry",
+                body='{"ping": 1}',
+                api_key="rc-test",
+                max_retries=0,
+            )
+            assert 200 <= result.status < 300, (
+                f"cloud_server should return 202, got {result.status}"
+            )
+            assert events == [], (
+                f"cloud transport leaked into interceptor — captured {len(events)} "
+                f"event(s); the urllib.request-based path must not be patched"
+            )
+        finally:
+            uninstall()
+
+
+# ---------------------------------------------------------------------------
+# 5xx retry — exponential backoff, max_retries respected (#9)
+# ---------------------------------------------------------------------------
+
+
+class Test5xxRetry:
+    """Counterpart to test_no_retry_on_4xx (line 121). 5xx is retriable;
+    the loop in _post_cloud sleeps min(1.0 * 2**attempt, 10.0) between
+    attempts and stops after max_retries + 1 total tries."""
+
+    def test_5xx_retries_exactly_max_retries_attempts(self, cloud_server, monkeypatch):
+        from recost._transport import Transport
+        from recost._types import RecostConfig
+        # Eliminate the real backoff so the test runs fast
+        monkeypatch.setattr("recost._transport.time.sleep", lambda _s: None)
+        base_url, _ = cloud_server
+        _CloudHandler.response_code = 500
+        config = RecostConfig(
+            api_key="rc-test",
+            project_id="proj-123",
+            base_url=base_url,
+            max_retries=2,
+        )
+        transport = Transport(config)
+        transport.send(_make_summary())
+        transport.dispose()
+        # 1 initial attempt + 2 retries = 3 total
+        assert len(_CloudHandler.received) == 3, (
+            f"expected 3 total cloud POSTs (1 initial + 2 retries), got "
+            f"{len(_CloudHandler.received)}"
+        )
+
+    def test_5xx_retry_uses_exponential_backoff(self, cloud_server, monkeypatch):
+        from recost._transport import Transport
+        from recost._types import RecostConfig
+        sleeps: list[float] = []
+        monkeypatch.setattr(
+            "recost._transport.time.sleep",
+            lambda s: sleeps.append(s),
+        )
+        base_url, _ = cloud_server
+        _CloudHandler.response_code = 500
+        config = RecostConfig(
+            api_key="rc-test",
+            project_id="proj-123",
+            base_url=base_url,
+            max_retries=3,
+        )
+        transport = Transport(config)
+        transport.send(_make_summary())
+        transport.dispose()
+        # _post_cloud sleeps between attempts when attempt < max_retries.
+        # For max_retries=3 → attempts 0,1,2 each sleep; attempt 3 doesn't.
+        # Shape: min(1.0 * 2**attempt, 10.0) → [1.0, 2.0, 4.0].
+        assert sleeps == pytest.approx([1.0, 2.0, 4.0]), (
+            f"expected exponential backoff [1.0, 2.0, 4.0], got {sleeps}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Graceful degradation — websockets missing (#9)
 # ---------------------------------------------------------------------------
 

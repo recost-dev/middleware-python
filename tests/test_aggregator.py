@@ -501,3 +501,67 @@ class TestThreadSafety:
         assert flushed_total == total_expected, (
             f"lost events: flushed {flushed_total}, expected {total_expected}"
         )
+
+
+def test_overflow_triggers_early_flush(monkeypatch) -> None:
+    """When ingesting an event would push the aggregator past max_buckets,
+    the on_event closure in init() flushes the current window first so
+    that the new event lands in a fresh window. Verified by counting
+    Transport.send invocations."""
+    from recost import init, RecostConfig
+    from recost._transport import Transport
+    from recost._types import RawEvent
+
+    sent_summaries: list = []
+    real_send = Transport.send
+
+    def _capturing_send(self, summary):
+        sent_summaries.append(summary)
+        return real_send(self, summary)
+
+    monkeypatch.setattr(Transport, "send", _capturing_send)
+
+    handle = init(RecostConfig(
+        enabled=True,
+        api_key="rc-test",
+        project_id="p",
+        base_url="http://127.0.0.1:1",
+        max_buckets=2,
+        flush_interval_ms=600_000,
+        auto_shutdown_handlers=False,
+    ))
+    try:
+        from recost._interceptor import _callback
+        assert _callback is not None
+
+        def _event(host: str, path: str, method: str) -> RawEvent:
+            return RawEvent(
+                timestamp="2026-05-13T00:00:00Z",
+                method=method,
+                url=f"https://{host}{path}",
+                host=host,
+                path=path,
+                status_code=200,
+                latency_ms=10,
+                request_bytes=0,
+                response_bytes=0,
+            )
+
+        # Three distinct (provider, endpoint, method) triplets so each is its
+        # own bucket. With max_buckets=2, ingesting the 3rd must trigger
+        # an early flush before insertion.
+        _callback(_event("api.openai.com", "/v1/chat/completions", "POST"))
+        _callback(_event("api.openai.com", "/v1/embeddings", "POST"))
+        # 3rd unique triplet — would push past max_buckets=2 → early flush
+        _callback(_event("api.openai.com", "/v1/models", "GET"))
+
+        assert len(sent_summaries) == 1, (
+            f"expected exactly one early flush from would_overflow, "
+            f"got {len(sent_summaries)}"
+        )
+        flushed = sent_summaries[0]
+        # The flushed window held the first two triplets; the 3rd is now
+        # in a fresh window inside the aggregator (not yet flushed).
+        assert len(flushed.metrics) == 2
+    finally:
+        handle.dispose()
