@@ -297,6 +297,7 @@ class Transport:
         self._last_flush_status: Optional[FlushStatus] = None
 
         self._consecutive_auth_failures: int = 0
+        self._max_consecutive_auth_failures: int = config.max_consecutive_auth_failures
         self._suspended: bool = False
         self._auth_warned_stderr: bool = False
         self._defer_callback: Optional[Callable[[int], None]] = None
@@ -434,7 +435,7 @@ class Transport:
                     status=401,
                     consecutive_failures=self._consecutive_auth_failures,
                 ))
-            if self._consecutive_auth_failures >= 5:
+            if self._consecutive_auth_failures >= self._max_consecutive_auth_failures:
                 self._suspended = True
                 if self._on_error is not None:
                     self._on_error(RecostFatalAuthError(

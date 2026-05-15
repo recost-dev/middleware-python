@@ -194,6 +194,11 @@ class RecostConfig:
     shutdown_flush_timeout_ms: int = 3_000
     """How long dispose() waits for the final flush to complete before giving
     up and closing the transport. Matches Node's shutdownFlushTimeoutMs."""
+    max_consecutive_auth_failures: int = 5
+    """How many consecutive 401 responses suspend the cloud transport
+    (after which send() is a silent no-op until process restart).
+    Matches Node's maxConsecutiveAuthFailures. Reset on any non-401
+    outcome — success, non-401 4xx, 5xx, or network error. Defaults to 5."""
     auto_shutdown_handlers: bool = True
     """When True (default), init() registers an atexit handler that runs the
     final flush at normal process termination. Currently only atexit is

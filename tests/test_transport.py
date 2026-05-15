@@ -754,3 +754,34 @@ def test_local_transport_no_op_without_websockets(monkeypatch) -> None:
         # Restore the real module so subsequent tests aren't poisoned
         monkeypatch.undo()
         importlib.reload(transport_mod)
+
+
+# ---------------------------------------------------------------------------
+# 401 auth-failure lifecycle parity with Node (#32)
+# ---------------------------------------------------------------------------
+
+
+class TestConfigurableAuthThreshold:
+    """RecostConfig.max_consecutive_auth_failures must thread through to the
+    transport and gate the fatal-suspend threshold."""
+
+    def test_threshold_default_is_five(self):
+        from recost._transport import Transport
+        t = Transport(RecostConfig(
+            api_key="rc-test",
+            project_id="p",
+            base_url="http://127.0.0.1:1",
+            max_retries=0,
+        ))
+        assert t._max_consecutive_auth_failures == 5
+
+    def test_threshold_can_be_overridden(self):
+        from recost._transport import Transport
+        t = Transport(RecostConfig(
+            api_key="rc-test",
+            project_id="p",
+            base_url="http://127.0.0.1:1",
+            max_retries=0,
+            max_consecutive_auth_failures=2,
+        ))
+        assert t._max_consecutive_auth_failures == 2
