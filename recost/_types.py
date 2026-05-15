@@ -188,6 +188,12 @@ class RecostConfig:
     Crossing this threshold mid-window triggers an early flush so the API
     does not reject the payload with a 422."""
     local_port: int = 9847
+    local_transport: LocalTransportMode = "file"
+    """Which local-mode transport to use. Default ``file`` — writes NDJSON
+    frames to ~/.recost/local-telemetry/{project_id}.jsonl (or
+    $RECOST_LOCAL_DIR/{project_id}.jsonl if set). ``ws`` opens a
+    WebSocket to localhost:{local_port} — opt-in only, since the VS Code
+    extension does not host a WS server (recost-dev/extension#91)."""
     debug: bool = False
     enabled: bool = True
     custom_providers: List[ProviderDef] = field(default_factory=list)
@@ -222,6 +228,12 @@ class RecostConfig:
 # ---------------------------------------------------------------------------
 
 TransportMode = Literal["local", "cloud"]
+
+LocalTransportMode = Literal["file", "ws"]
+"""Which local-mode transport to use. ``file`` (default) writes NDJSON to
+~/.recost/local-telemetry/{project_id}.jsonl. ``ws`` opens a WebSocket
+to localhost:{local_port} — opt-in, since the VS Code extension does
+not host a WS server (recost-dev/extension#91)."""
 
 
 # ---------------------------------------------------------------------------
