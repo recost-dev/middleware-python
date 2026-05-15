@@ -964,3 +964,21 @@ class TestFlushBlocking:
         finally:
             block_event.set()  # let the background flush settle
             handle.dispose()
+
+
+class TestInitDefaultLocalTransport:
+    """init() picks the new 'file' default when local_transport isn't set (#38)."""
+
+    def test_init_default_local_transport_is_file(self, tmp_path, monkeypatch):
+        from recost import init, RecostConfig
+        from recost._transport import _LocalFileTransport
+
+        monkeypatch.setenv("RECOST_LOCAL_DIR", str(tmp_path))
+        handle = init(RecostConfig(
+            project_id="proj_default_e2e",
+            auto_shutdown_handlers=False,
+        ))
+        try:
+            assert isinstance(handle._transport._local, _LocalFileTransport)
+        finally:
+            handle.dispose()

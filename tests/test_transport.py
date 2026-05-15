@@ -311,7 +311,7 @@ class TestLocalTransportSync:
         within the loop-yield window — no blocking queue.get hanging."""
         pytest.importorskip("websockets")
         port = _find_free_port()
-        transport = Transport(RecostConfig(local_port=port))
+        transport = Transport(RecostConfig(local_port=port, local_transport="ws"))
         assert transport.mode == "local"
         time.sleep(0.2)
         start = time.monotonic()
@@ -1114,3 +1114,79 @@ class TestLocalFileTransport:
             f"expected exactly 1 on_error per failure episode, got {len(errors)}"
         )
         assert isinstance(errors[0], OSError)
+
+
+class TestLocalTransportSelection:
+    """Transport.__init__ picks the right local-mode class based on
+    config.local_transport. Default is 'file' (#38)."""
+
+    def test_default_local_transport_is_file(self, tmp_path, monkeypatch):
+        from recost._transport import Transport, _LocalFileTransport
+        from recost._types import RecostConfig
+
+        monkeypatch.setenv("RECOST_LOCAL_DIR", str(tmp_path))
+        t = Transport(RecostConfig(
+            project_id="proj_default",
+            auto_shutdown_handlers=False,
+        ))
+        try:
+            assert isinstance(t._local, _LocalFileTransport)
+        finally:
+            t.dispose()
+
+    def test_explicit_ws_local_transport_uses_ws(self, monkeypatch):
+        """Setting local_transport='ws' wires the existing WebSocket class."""
+        from recost._transport import Transport, _LocalTransport
+        from recost._types import RecostConfig
+
+        t = Transport(RecostConfig(
+            project_id="proj_ws",
+            local_transport="ws",
+            auto_shutdown_handlers=False,
+        ))
+        try:
+            assert isinstance(t._local, _LocalTransport)
+        finally:
+            t.dispose()
+
+    def test_file_transport_receives_a_real_send(self, tmp_path, monkeypatch):
+        """End-to-end: a Transport in file mode that send()s a real
+        WindowSummary writes one valid NDJSON line containing
+        protocolVersion: '1.0'."""
+        import json as _json
+        from recost._transport import Transport
+        from recost._types import (
+            RecostConfig, WindowSummary, MetricEntry, iso_now_ms_z,
+        )
+
+        monkeypatch.setenv("RECOST_LOCAL_DIR", str(tmp_path))
+        t = Transport(RecostConfig(
+            project_id="proj_e2e",
+            auto_shutdown_handlers=False,
+        ))
+        summary = WindowSummary(
+            project_id="proj_e2e",
+            environment="test",
+            sdk_language="python",
+            sdk_version="0.0.0",
+            window_start=iso_now_ms_z(),
+            window_end=iso_now_ms_z(),
+            metrics=[MetricEntry(
+                provider="openai", endpoint="/v1/x", method="POST",
+                request_count=1, error_count=0, total_latency_ms=10,
+                p50_latency_ms=10, p95_latency_ms=10,
+                total_request_bytes=0, total_response_bytes=0,
+                estimated_cost_cents=0.0,
+            )],
+        )
+        t.send(summary)
+        t.dispose()
+
+        p = tmp_path / "proj_e2e.jsonl"
+        assert p.exists()
+        lines = p.read_text().splitlines()
+        assert len(lines) == 1
+        frame = _json.loads(lines[0])
+        assert frame["protocolVersion"] == "1.0"
+        assert frame["environment"] == "test"
+        assert frame["metrics"][0]["provider"] == "openai"

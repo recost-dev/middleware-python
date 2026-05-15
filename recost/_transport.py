@@ -22,7 +22,7 @@ import urllib.request
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import IO, Callable, Optional
+from typing import IO, Callable, Optional, Union
 
 from ._types import FlushStatus, RecostConfig, TransportMode, WindowSummary
 
@@ -409,13 +409,24 @@ class Transport:
         self._auth_warned_stderr: bool = False
         self._defer_callback: Optional[Callable[[int], None]] = None
 
-        self._local: Optional[_LocalTransport] = None
+        # Local-mode transport: file (default) or ws (opt-in, see #38).
+        # The attribute is typed as the union of both — both expose
+        # send(payload: str) and dispose() so the rest of Transport
+        # doesn't care which one is wired.
+        self._local: Optional[Union[_LocalFileTransport, _LocalTransport]] = None
         if self.mode == "local":
-            self._local = _LocalTransport(
-                config.local_port,
-                config.debug,
-                shutdown_timeout_s=config.shutdown_flush_timeout_ms / 1000.0,
-            )
+            if config.local_transport == "file":
+                self._local = _LocalFileTransport(
+                    project_id=config.project_id or "",
+                    on_error=config.on_error,
+                    debug=config.debug,
+                )
+            else:  # "ws" — opt-in
+                self._local = _LocalTransport(
+                    config.local_port,
+                    config.debug,
+                    shutdown_timeout_s=config.shutdown_flush_timeout_ms / 1000.0,
+                )
 
     @property
     def last_flush_status(self) -> Optional[FlushStatus]:
