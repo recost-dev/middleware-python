@@ -902,3 +902,116 @@ class TestAuthFailureCounterReset:
             f"Network throw must reset the 401 streak; counter still at "
             f"{t._consecutive_auth_failures}"
         )
+
+
+class TestAuthStderrText:
+    """First and second stderr lines must match Node's format so cross-SDK
+    log greps work uniformly."""
+
+    def test_first_stderr_line_matches_node_format(self, monkeypatch, capsys):
+        """First 401 emits the '[recost] HTTP 401 — API key rejected...' line."""
+        from recost._transport import Transport, _CloudResult
+        from recost._types import (
+            RecostConfig, WindowSummary, MetricEntry, iso_now_ms_z,
+        )
+
+        t = Transport(RecostConfig(
+            api_key="rc-test", project_id="p",
+            base_url="http://127.0.0.1:1", max_retries=0,
+            max_consecutive_auth_failures=5,
+        ))
+        from recost import _transport
+        monkeypatch.setattr(_transport, "_post_cloud", lambda *a, **k: _CloudResult(
+            status=401, request_id=None, error=None, retry_after_ms=None,
+        ))
+        summary = WindowSummary(
+            project_id="p", environment="t", sdk_language="python", sdk_version="0",
+            window_start=iso_now_ms_z(), window_end=iso_now_ms_z(),
+            metrics=[MetricEntry(
+                provider="openai", endpoint="/v1/x", method="POST",
+                request_count=1, error_count=0, total_latency_ms=10,
+                p50_latency_ms=10, p95_latency_ms=10,
+                total_request_bytes=0, total_response_bytes=0,
+                estimated_cost_cents=0.0,
+            )],
+        )
+        t.send(summary)
+        captured = capsys.readouterr()
+        assert "[recost] HTTP 401" in captured.err
+        assert "API key rejected" in captured.err
+        assert "Telemetry will stop after 5 consecutive" in captured.err
+
+    def test_second_stderr_line_at_fatal_suspend(self, monkeypatch, capsys):
+        """Hitting the threshold emits a SECOND distinct '[recost] cloud
+        transport suspended after N consecutive auth failures' line."""
+        from recost._transport import Transport, _CloudResult
+        from recost._types import (
+            RecostConfig, WindowSummary, MetricEntry, iso_now_ms_z,
+        )
+
+        t = Transport(RecostConfig(
+            api_key="rc-test", project_id="p",
+            base_url="http://127.0.0.1:1", max_retries=0,
+            max_consecutive_auth_failures=2,
+        ))
+        from recost import _transport
+        monkeypatch.setattr(_transport, "_post_cloud", lambda *a, **k: _CloudResult(
+            status=401, request_id=None, error=None, retry_after_ms=None,
+        ))
+
+        def _send_once():
+            summary = WindowSummary(
+                project_id="p", environment="t", sdk_language="python", sdk_version="0",
+                window_start=iso_now_ms_z(), window_end=iso_now_ms_z(),
+                metrics=[MetricEntry(
+                    provider="openai", endpoint="/v1/x", method="POST",
+                    request_count=1, error_count=0, total_latency_ms=10,
+                    p50_latency_ms=10, p95_latency_ms=10,
+                    total_request_bytes=0, total_response_bytes=0,
+                    estimated_cost_cents=0.0,
+                )],
+            )
+            t.send(summary)
+
+        _send_once()  # failure 1 — first stderr line only
+        _send_once()  # failure 2 — should also emit the suspended line
+        captured = capsys.readouterr()
+        assert "[recost] cloud transport suspended" in captured.err, (
+            f"second stderr line missing; captured: {captured.err!r}"
+        )
+        assert "2 consecutive auth failures" in captured.err
+        assert "Restart the process" in captured.err
+
+    def test_no_second_stderr_line_below_threshold(self, monkeypatch, capsys):
+        """If consecutive 401s stay below the threshold, the 'suspended'
+        line MUST NOT appear."""
+        from recost._transport import Transport, _CloudResult
+        from recost._types import (
+            RecostConfig, WindowSummary, MetricEntry, iso_now_ms_z,
+        )
+
+        t = Transport(RecostConfig(
+            api_key="rc-test", project_id="p",
+            base_url="http://127.0.0.1:1", max_retries=0,
+            max_consecutive_auth_failures=5,
+        ))
+        from recost import _transport
+        monkeypatch.setattr(_transport, "_post_cloud", lambda *a, **k: _CloudResult(
+            status=401, request_id=None, error=None, retry_after_ms=None,
+        ))
+        summary = WindowSummary(
+            project_id="p", environment="t", sdk_language="python", sdk_version="0",
+            window_start=iso_now_ms_z(), window_end=iso_now_ms_z(),
+            metrics=[MetricEntry(
+                provider="openai", endpoint="/v1/x", method="POST",
+                request_count=1, error_count=0, total_latency_ms=10,
+                p50_latency_ms=10, p95_latency_ms=10,
+                total_request_bytes=0, total_response_bytes=0,
+                estimated_cost_cents=0.0,
+            )],
+        )
+        # Only 2 failures — well below the threshold of 5.
+        t.send(summary)
+        t.send(summary)
+        captured = capsys.readouterr()
+        assert "[recost] cloud transport suspended" not in captured.err

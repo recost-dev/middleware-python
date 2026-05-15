@@ -399,9 +399,7 @@ class Transport:
         on 4xx can contain field-level validation detail that hints at
         project / key shape.
         """
-        if status == 401:
-            reason = "API key is invalid or has been revoked. Check RECOST_API_KEY."
-        elif status == 403:
+        if status == 403:
             reason = "API key does not have access to this project. Check RECOST_PROJECT_ID."
         elif status == 404:
             reason = "Project not found. Check RECOST_PROJECT_ID."
@@ -431,8 +429,10 @@ class Transport:
             if not self._auth_warned_stderr:
                 import sys
                 print(
-                    "Recost: API rejected key (401). Telemetry will be dropped. "
-                    "Check your api_key at https://recost.dev/dashboard/account.",
+                    f"[recost] HTTP 401 — API key rejected. Telemetry will "
+                    f"stop after {self._max_consecutive_auth_failures} consecutive "
+                    f"failures. Check your api_key at "
+                    f"https://recost.dev/dashboard/account.",
                     file=sys.stderr,
                 )
                 self._auth_warned_stderr = True
@@ -443,6 +443,16 @@ class Transport:
                 ))
             if self._consecutive_auth_failures >= self._max_consecutive_auth_failures:
                 self._suspended = True
+                # Second, distinct stderr line at fatal-suspend so log greps
+                # for "[recost] cloud transport suspended" find this exact
+                # moment regardless of on_error wiring. Matches Node format.
+                import sys
+                print(
+                    f"[recost] cloud transport suspended after "
+                    f"{self._consecutive_auth_failures} consecutive auth "
+                    f"failures. Restart the process after rotating apiKey.",
+                    file=sys.stderr,
+                )
                 if self._on_error is not None:
                     self._on_error(RecostFatalAuthError(
                         status=401,
