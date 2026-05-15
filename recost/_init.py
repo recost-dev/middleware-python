@@ -261,10 +261,16 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
         _handle_ref: List[Optional["RecostHandle"]] = [None]
         _pid_warned: List[bool] = [False]
 
-        def flush_and_send() -> None:
+        def flush_and_send() -> bool:
+            """Returns True iff transport.send was actually invoked.
+
+            Returning False (empty window — nothing to send) lets the
+            caller distinguish a no-op from a successful network flush,
+            which matters for backoff bookkeeping in _timer_loop.
+            """
             summary = aggregator.flush()
             if summary is None:
-                return
+                return False
             if debug:
                 print(
                     f"[recost] flush: {len(summary.metrics)} metric group(s), "
@@ -272,6 +278,7 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
                     file=sys.stderr,
                 )
             transport.send(summary)
+            return True
 
         def on_event(event: RawEvent) -> None:
             # PID backstop: if the at-fork hook didn't fire on this platform,
@@ -341,8 +348,10 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
         stop_event = threading.Event()
 
         def _timer_loop() -> None:
+            consecutive_failures = 0
+            last_backoff_announced_ms = 0
             while not stop_event.is_set():
-                # Consume any pending 429 deferral before the next sleep.
+                # Consume any pending deferral (429 or flush-backoff) before next sleep.
                 with _deferral_lock:
                     extra_ms = _deferral_ms[0]
                     _deferral_ms[0] = 0
@@ -350,8 +359,29 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
                 if stop_event.wait(timeout=wait):
                     return
                 try:
-                    flush_and_send()
+                    sent = flush_and_send()
+                    # Only a real successful send clears the failure
+                    # streak — an empty window is a no-op, not a recovery.
+                    if sent and consecutive_failures > 0:
+                        consecutive_failures = 0
+                        last_backoff_announced_ms = 0
                 except Exception as err:
+                    consecutive_failures += 1
+                    if consecutive_failures >= 5:
+                        backoff_ms = min(
+                            1000 * (2 ** (consecutive_failures - 5)),
+                            300_000,
+                        )
+                        _defer(backoff_ms)
+                        if backoff_ms > last_backoff_announced_ms:
+                            last_backoff_announced_ms = backoff_ms
+                            from ._types import RecostError
+                            if config.on_error is not None:
+                                config.on_error(RecostError(
+                                    f"recost: flush failing repeatedly "
+                                    f"({consecutive_failures} consecutive); "
+                                    f"backing off {backoff_ms}ms"
+                                ))
                     if config.on_error:
                         config.on_error(err)
                     elif debug:
