@@ -142,12 +142,14 @@ class _LocalTransport:
         shutdown_timeout_s: float = 3.0,
         on_error: Optional[Callable[[Exception], None]] = None,
         max_queue_size: int = 1000,
+        max_reconnect_attempts: int = 10,
     ) -> None:
         self._port = port
         self._debug = debug
         self._shutdown_timeout_s = shutdown_timeout_s
         self._on_error = on_error
         self._max_queue_size = max_queue_size
+        self._max_reconnect_attempts = max_reconnect_attempts
         self._drop_announced = False
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -233,9 +235,28 @@ class _LocalTransport:
             except Exception:
                 if not self._running:
                     return
-                base = min(0.5 * (2 ** reconnect_attempts), 30.0)
-                delay = base * (1 + (random.random() - 0.5) * 0.5)  # 0.75x..1.25x
                 reconnect_attempts += 1
+                if reconnect_attempts > self._max_reconnect_attempts:
+                    # Give up. Announce via on_error and stop the loop.
+                    self._running = False
+                    if self._on_error is not None:
+                        from ._types import RecostError
+                        cb = self._on_error
+                        port = self._port
+                        attempts = reconnect_attempts - 1
+                        try:
+                            cb(RecostError(
+                                f"recost: local WS transport gave up after "
+                                f"{attempts} failed connects to "
+                                f"127.0.0.1:{port}. Set local_transport='file' "
+                                f"to write telemetry to disk instead."
+                            ))
+                        except Exception:
+                            # User callback raised — never crash the loop.
+                            pass
+                    return
+                base = min(0.5 * (2 ** (reconnect_attempts - 1)), 30.0)
+                delay = base * (1 + (random.random() - 0.5) * 0.5)  # 0.75x..1.25x
                 await asyncio.sleep(delay)
 
     def send(self, payload: str) -> None:

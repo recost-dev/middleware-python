@@ -1258,3 +1258,62 @@ class TestLocalWsQueueCap:
             assert "cap=2" in msg
         finally:
             loop.close()
+
+
+class TestLocalWsReconnectCap:
+    """The WS local transport must give up after N failed connects and
+    fire on_error once (#7). Only matters for opt-in WS users."""
+
+    def test_gives_up_after_max_reconnect_attempts(self):
+        """When the server is unreachable, the loop stops after
+        max_reconnect_attempts failures and fires on_error once."""
+        import time as _time
+        from recost._transport import _LocalTransport
+
+        # Skip if websockets isn't installed — the transport never starts.
+        try:
+            import websockets  # noqa: F401
+        except ImportError:
+            import pytest
+            pytest.skip("websockets package not installed")
+
+        errors: list = []
+        # port 1 is reserved; connect will fail immediately.
+        t = _LocalTransport(
+            port=1,
+            on_error=errors.append,
+            max_reconnect_attempts=3,
+            shutdown_timeout_s=5.0,
+        )
+        try:
+            # Reconnect backoff: 0.5s, 1s, 2s, 4s (jittered) — so 4 attempts
+            # finish within ~10s in the worst case.
+            deadline = _time.time() + 15.0
+            while _time.time() < deadline and t._running:
+                _time.sleep(0.1)
+            assert not t._running, "transport did not give up within 15s"
+        finally:
+            t.dispose()
+
+        assert len(errors) == 1, f"expected 1 error, got {len(errors)}: {errors}"
+        msg = str(errors[0])
+        assert "gave up" in msg
+        assert "127.0.0.1:1" in msg
+        assert "local_transport='file'" in msg
+
+    def test_successful_connect_resets_attempt_counter(self):
+        """A successful connect zeros reconnect_attempts so a later
+        disconnect doesn't pick up where the last failure left off.
+
+        This is implicitly tested by inspection — the existing
+        '_run' / '_ws_loop' sets reconnect_attempts = 0 inside the
+        `async with websockets.connect(...) as ws:` block. We verify
+        the line is still present after the refactor.
+        """
+        import inspect
+        from recost._transport import _LocalTransport
+
+        src = inspect.getsource(_LocalTransport._ws_loop)
+        assert "reconnect_attempts = 0" in src, (
+            "_ws_loop must reset reconnect_attempts on successful connect"
+        )
