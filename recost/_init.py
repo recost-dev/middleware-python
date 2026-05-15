@@ -11,6 +11,7 @@ import sys
 import threading
 import warnings
 from typing import Callable, List, Optional
+from urllib.parse import urlparse
 
 from ._aggregator import Aggregator
 from ._interceptor import install, uninstall
@@ -185,6 +186,14 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
                     f"See https://recost.dev/docs/api-keys."
                 )
 
+        for pat in config.exclude_patterns:
+            if "*" in pat:
+                raise ValueError(
+                    f"Recost: exclude_patterns is substring match, not "
+                    f"glob. Got {pat!r} with '*'. Use exclude_hosts for "
+                    f"exact host match, or remove the asterisk."
+                )
+
         # Resolve flush interval: prefer the new ms-based field, but if a caller
         # still passes the legacy seconds-based flush_interval, honor it with a
         # deprecation warning so existing code keeps working until they migrate.
@@ -227,13 +236,23 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
 
         transport.set_defer_callback(_defer)
 
-        # Build the set of URL substrings to exclude from tracking.
+        # Build exclude sets: exact-host short-circuit + substring fallback.
         exclude_patterns = list(config.exclude_patterns)
+        exclude_hosts_set = set(config.exclude_hosts)
         if config.api_key:
-            exclude_patterns.append(config.base_url.rstrip("/"))
+            base_host = urlparse(config.base_url).hostname or ""
+            if base_host:
+                exclude_hosts_set.add(base_host)
+            # When base_url points at a loopback, add the other loopback
+            # form too so 127.0.0.1 / localhost are interchangeable.
+            if base_host in {"localhost", "127.0.0.1"}:
+                exclude_hosts_set.add("localhost")
+                exclude_hosts_set.add("127.0.0.1")
         else:
-            exclude_patterns.append(f"127.0.0.1:{config.local_port}")
-            exclude_patterns.append(f"localhost:{config.local_port}")
+            exclude_hosts_set.add("localhost")
+            exclude_hosts_set.add("127.0.0.1")
+            # local_port is still substring-matched (port-specific)
+            exclude_patterns.append(f":{config.local_port}")
 
         # PID backstop cells — populated after `handle` is constructed below.
         # The on_event closure reads these on every event so a forked child
@@ -272,7 +291,9 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
                 except Exception:
                     return  # never let SDK errors break user code
 
-            # Drop excluded URLs
+            # Drop excluded events — exact host match short-circuits first
+            if event.host in exclude_hosts_set:
+                return
             for pattern in exclude_patterns:
                 if pattern in event.url or pattern in event.host:
                     return

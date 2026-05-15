@@ -450,3 +450,196 @@ def test_dispose_prevents_further_flushes(monkeypatch) -> None:
         f"send was called {send_count[0]} times after dispose() — "
         f"timer was {pre_dispose} pre-dispose; dispose did not stop the loop"
     )
+
+
+# ---------------------------------------------------------------------------
+# Exclude semantics (#12)
+# ---------------------------------------------------------------------------
+
+
+class TestExcludeSemantics:
+    """exclude_hosts (exact) + exclude_patterns (substring, no glob) +
+    loopback parity in cloud mode pointed at localhost."""
+
+    def test_exclude_patterns_rejects_asterisk(self):
+        import pytest as _pytest
+        from recost import init, RecostConfig
+        with _pytest.raises(ValueError, match="substring match, not glob"):
+            init(RecostConfig(exclude_patterns=["*.internal.corp"]))
+
+    def test_exclude_hosts_exact_match(self, monkeypatch):
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+        from recost._types import RawEvent
+
+        sent: list = []
+        monkeypatch.setattr(Transport, "send", lambda self, s: sent.append(s))
+
+        handle = init(RecostConfig(
+            enabled=True,
+            exclude_hosts=["api.example.com"],
+            flush_interval_ms=600_000,
+            auto_shutdown_handlers=False,
+        ))
+        from recost._interceptor import _callback
+        assert _callback is not None
+
+        def _ev(host: str) -> RawEvent:
+            return RawEvent(
+                timestamp="2026-05-14T00:00:00Z",
+                method="GET",
+                url=f"https://{host}/x",
+                host=host,
+                path="/x",
+                status_code=200,
+                latency_ms=10,
+                request_bytes=0,
+                response_bytes=0,
+            )
+
+        _callback(_ev("api.example.com"))    # excluded
+        _callback(_ev("myapi.example.com"))  # NOT excluded — exact match
+        handle.dispose()  # triggers final flush
+
+        # myapi.example.com made it through; api.example.com did not
+        assert len(sent) == 1
+        total_events = sum(m.request_count for m in sent[0].metrics)
+        assert total_events == 1
+
+    def test_cloud_mode_excludes_base_url_host_only(self, monkeypatch):
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+        from recost._types import RawEvent
+
+        sent: list = []
+        monkeypatch.setattr(Transport, "send", lambda self, s: sent.append(s))
+
+        handle = init(RecostConfig(
+            enabled=True,
+            api_key="rc-test",
+            project_id="p",
+            base_url="https://api.recost.dev",
+            flush_interval_ms=600_000,
+            auto_shutdown_handlers=False,
+        ))
+        from recost._interceptor import _callback
+        assert _callback is not None
+        # Exact host of base_url — excluded
+        _callback(RawEvent(
+            timestamp="2026-05-14T00:00:00Z",
+            method="POST", url="https://api.recost.dev/projects/p/telemetry",
+            host="api.recost.dev", path="/projects/p/telemetry",
+            status_code=200, latency_ms=10, request_bytes=0, response_bytes=0,
+        ))
+        # Different host, base_url substring in URL — NOT excluded
+        # (previously would have been falsely excluded by substring)
+        _callback(RawEvent(
+            timestamp="2026-05-14T00:00:00Z",
+            method="GET",
+            url="https://proxy.example.com/redirect?to=api.recost.dev",
+            host="proxy.example.com", path="/redirect",
+            status_code=200, latency_ms=10, request_bytes=0, response_bytes=0,
+        ))
+        handle.dispose()  # triggers final flush
+
+        assert len(sent) == 1
+        total_events = sum(m.request_count for m in sent[0].metrics)
+        assert total_events == 1  # only the proxy.example.com event
+
+    def test_cloud_mode_loopback_excludes_both_forms(self, monkeypatch):
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+        from recost._types import RawEvent
+
+        sent: list = []
+        monkeypatch.setattr(Transport, "send", lambda self, s: sent.append(s))
+
+        handle = init(RecostConfig(
+            enabled=True,
+            api_key="rc-test",
+            project_id="p",
+            base_url="http://localhost:3000",
+            flush_interval_ms=600_000,
+            auto_shutdown_handlers=False,
+        ))
+        from recost._interceptor import _callback
+        assert _callback is not None
+        # Both loopback forms should be excluded
+        for loopback in ("localhost", "127.0.0.1"):
+            _callback(RawEvent(
+                timestamp="2026-05-14T00:00:00Z",
+                method="POST", url=f"http://{loopback}:3000/x",
+                host=loopback, path="/x",
+                status_code=200, latency_ms=10, request_bytes=0, response_bytes=0,
+            ))
+        # Different host should still be tracked
+        _callback(RawEvent(
+            timestamp="2026-05-14T00:00:00Z",
+            method="GET", url="https://example.com/y",
+            host="example.com", path="/y",
+            status_code=200, latency_ms=10, request_bytes=0, response_bytes=0,
+        ))
+        handle.dispose()  # triggers final flush
+
+        assert len(sent) == 1
+        total_events = sum(m.request_count for m in sent[0].metrics)
+        assert total_events == 1  # only example.com
+
+    def test_local_mode_excludes_loopback_hosts(self, monkeypatch):
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+        from recost._types import RawEvent
+
+        sent: list = []
+        monkeypatch.setattr(Transport, "send", lambda self, s: sent.append(s))
+
+        handle = init(RecostConfig(
+            enabled=True,
+            flush_interval_ms=600_000,
+            auto_shutdown_handlers=False,
+        ))
+        from recost._interceptor import _callback
+        assert _callback is not None
+        for loopback in ("localhost", "127.0.0.1"):
+            _callback(RawEvent(
+                timestamp="2026-05-14T00:00:00Z",
+                method="GET", url=f"http://{loopback}/x",
+                host=loopback, path="/x",
+                status_code=200, latency_ms=10, request_bytes=0, response_bytes=0,
+            ))
+        handle.dispose()  # triggers final flush
+
+        # Aggregator empty -> no summary sent (or empty summary)
+        assert sent == [] or all(
+            sum(m.request_count for m in s.metrics) == 0 for s in sent
+        )
+
+    def test_local_mode_port_substring_excludes_other_loopback_urls(self, monkeypatch):
+        """An event with host='not-localhost' but URL containing the local
+        port should still be excluded by the :PORT substring pattern."""
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+        from recost._types import RawEvent
+
+        sent: list = []
+        monkeypatch.setattr(Transport, "send", lambda self, s: sent.append(s))
+
+        handle = init(RecostConfig(
+            enabled=True,
+            local_port=9847,
+            flush_interval_ms=600_000,
+            auto_shutdown_handlers=False,
+        ))
+        from recost._interceptor import _callback
+        assert _callback is not None
+        _callback(RawEvent(
+            timestamp="2026-05-14T00:00:00Z",
+            method="GET", url="http://not-localhost:9847/x",
+            host="not-localhost", path="/x",
+            status_code=200, latency_ms=10, request_bytes=0, response_bytes=0,
+        ))
+        handle.dispose()  # triggers final flush
+
+        assert sent == [] or all(
+            sum(m.request_count for m in s.metrics) == 0 for s in sent
+        )
