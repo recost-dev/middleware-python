@@ -160,6 +160,11 @@ class RecostConfig:
     enabled: bool = True
     custom_providers: List[ProviderDef] = field(default_factory=list)
     exclude_patterns: List[str] = field(default_factory=list)
+    exclude_hosts: List[str] = field(default_factory=list)
+    """Exact host names to exclude from telemetry (event.host == h).
+    Distinct from exclude_patterns (substring-match against event.url
+    and event.host). Use this for unambiguous host-level exclusion
+    that won't false-positive on substring overlap."""
     base_url: str = "https://api.recost.dev"
     max_retries: int = 3
     shutdown_flush_timeout_ms: int = 3_000

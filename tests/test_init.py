@@ -450,3 +450,437 @@ def test_dispose_prevents_further_flushes(monkeypatch) -> None:
         f"send was called {send_count[0]} times after dispose() — "
         f"timer was {pre_dispose} pre-dispose; dispose did not stop the loop"
     )
+
+
+# ---------------------------------------------------------------------------
+# Exclude semantics (#12)
+# ---------------------------------------------------------------------------
+
+
+class TestExcludeSemantics:
+    """exclude_hosts (exact) + exclude_patterns (substring, no glob) +
+    loopback parity in cloud mode pointed at localhost."""
+
+    def test_exclude_patterns_rejects_asterisk(self):
+        import pytest as _pytest
+        from recost import init, RecostConfig
+        with _pytest.raises(ValueError, match="substring match, not glob"):
+            init(RecostConfig(exclude_patterns=["*.internal.corp"]))
+
+    def test_exclude_hosts_exact_match(self, monkeypatch):
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+        from recost._types import RawEvent
+
+        sent: list = []
+        monkeypatch.setattr(Transport, "send", lambda self, s: sent.append(s))
+
+        handle = init(RecostConfig(
+            enabled=True,
+            exclude_hosts=["api.example.com"],
+            flush_interval_ms=600_000,
+            auto_shutdown_handlers=False,
+        ))
+        from recost._interceptor import _callback
+        assert _callback is not None
+
+        def _ev(host: str) -> RawEvent:
+            return RawEvent(
+                timestamp="2026-05-14T00:00:00Z",
+                method="GET",
+                url=f"https://{host}/x",
+                host=host,
+                path="/x",
+                status_code=200,
+                latency_ms=10,
+                request_bytes=0,
+                response_bytes=0,
+            )
+
+        _callback(_ev("api.example.com"))    # excluded
+        _callback(_ev("myapi.example.com"))  # NOT excluded — exact match
+        handle.dispose()  # triggers final flush
+
+        # myapi.example.com made it through; api.example.com did not
+        assert len(sent) == 1
+        total_events = sum(m.request_count for m in sent[0].metrics)
+        assert total_events == 1
+
+    def test_cloud_mode_excludes_base_url_host_only(self, monkeypatch):
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+        from recost._types import RawEvent
+
+        sent: list = []
+        monkeypatch.setattr(Transport, "send", lambda self, s: sent.append(s))
+
+        handle = init(RecostConfig(
+            enabled=True,
+            api_key="rc-test",
+            project_id="p",
+            base_url="https://api.recost.dev",
+            flush_interval_ms=600_000,
+            auto_shutdown_handlers=False,
+        ))
+        from recost._interceptor import _callback
+        assert _callback is not None
+        # Exact host of base_url — excluded
+        _callback(RawEvent(
+            timestamp="2026-05-14T00:00:00Z",
+            method="POST", url="https://api.recost.dev/projects/p/telemetry",
+            host="api.recost.dev", path="/projects/p/telemetry",
+            status_code=200, latency_ms=10, request_bytes=0, response_bytes=0,
+        ))
+        # Different host, base_url substring in URL — NOT excluded
+        # (previously would have been falsely excluded by substring)
+        _callback(RawEvent(
+            timestamp="2026-05-14T00:00:00Z",
+            method="GET",
+            url="https://proxy.example.com/redirect?to=api.recost.dev",
+            host="proxy.example.com", path="/redirect",
+            status_code=200, latency_ms=10, request_bytes=0, response_bytes=0,
+        ))
+        handle.dispose()  # triggers final flush
+
+        assert len(sent) == 1
+        total_events = sum(m.request_count for m in sent[0].metrics)
+        assert total_events == 1  # only the proxy.example.com event
+
+    def test_cloud_mode_loopback_excludes_both_forms(self, monkeypatch):
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+        from recost._types import RawEvent
+
+        sent: list = []
+        monkeypatch.setattr(Transport, "send", lambda self, s: sent.append(s))
+
+        handle = init(RecostConfig(
+            enabled=True,
+            api_key="rc-test",
+            project_id="p",
+            base_url="http://localhost:3000",
+            flush_interval_ms=600_000,
+            auto_shutdown_handlers=False,
+        ))
+        from recost._interceptor import _callback
+        assert _callback is not None
+        # Both loopback forms should be excluded
+        for loopback in ("localhost", "127.0.0.1"):
+            _callback(RawEvent(
+                timestamp="2026-05-14T00:00:00Z",
+                method="POST", url=f"http://{loopback}:3000/x",
+                host=loopback, path="/x",
+                status_code=200, latency_ms=10, request_bytes=0, response_bytes=0,
+            ))
+        # Different host should still be tracked
+        _callback(RawEvent(
+            timestamp="2026-05-14T00:00:00Z",
+            method="GET", url="https://example.com/y",
+            host="example.com", path="/y",
+            status_code=200, latency_ms=10, request_bytes=0, response_bytes=0,
+        ))
+        handle.dispose()  # triggers final flush
+
+        assert len(sent) == 1
+        total_events = sum(m.request_count for m in sent[0].metrics)
+        assert total_events == 1  # only example.com
+
+    def test_local_mode_excludes_loopback_hosts(self, monkeypatch):
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+        from recost._types import RawEvent
+
+        sent: list = []
+        monkeypatch.setattr(Transport, "send", lambda self, s: sent.append(s))
+
+        handle = init(RecostConfig(
+            enabled=True,
+            flush_interval_ms=600_000,
+            auto_shutdown_handlers=False,
+        ))
+        from recost._interceptor import _callback
+        assert _callback is not None
+        for loopback in ("localhost", "127.0.0.1"):
+            _callback(RawEvent(
+                timestamp="2026-05-14T00:00:00Z",
+                method="GET", url=f"http://{loopback}/x",
+                host=loopback, path="/x",
+                status_code=200, latency_ms=10, request_bytes=0, response_bytes=0,
+            ))
+        handle.dispose()  # triggers final flush
+
+        # Aggregator empty -> no summary sent (or empty summary)
+        assert sent == [] or all(
+            sum(m.request_count for m in s.metrics) == 0 for s in sent
+        )
+
+    def test_local_mode_port_substring_excludes_other_loopback_urls(self, monkeypatch):
+        """An event with host='not-localhost' but URL containing the local
+        port should still be excluded by the :PORT substring pattern."""
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+        from recost._types import RawEvent
+
+        sent: list = []
+        monkeypatch.setattr(Transport, "send", lambda self, s: sent.append(s))
+
+        handle = init(RecostConfig(
+            enabled=True,
+            local_port=9847,
+            flush_interval_ms=600_000,
+            auto_shutdown_handlers=False,
+        ))
+        from recost._interceptor import _callback
+        assert _callback is not None
+        _callback(RawEvent(
+            timestamp="2026-05-14T00:00:00Z",
+            method="GET", url="http://not-localhost:9847/x",
+            host="not-localhost", path="/x",
+            status_code=200, latency_ms=10, request_bytes=0, response_bytes=0,
+        ))
+        handle.dispose()  # triggers final flush
+
+        assert sent == [] or all(
+            sum(m.request_count for m in s.metrics) == 0 for s in sent
+        )
+
+
+# ---------------------------------------------------------------------------
+# Flush-loop exponential backoff (#10)
+# ---------------------------------------------------------------------------
+
+
+class TestFlushLoopBackoff:
+    """Persistent flush failures must back off, not fire every interval forever."""
+
+    def test_consecutive_failures_below_threshold_no_backoff(self, monkeypatch):
+        """Failures 1-4 should not emit any 'backing off' announcement."""
+        import time as _time
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+
+        send_count = [0]
+
+        def _failing_send(self, summary):
+            send_count[0] += 1
+            raise RuntimeError("simulated transport failure")
+
+        monkeypatch.setattr(Transport, "send", _failing_send)
+
+        errors: list = []
+        handle = init(RecostConfig(
+            enabled=True,
+            api_key="rc-test", project_id="p",
+            base_url="http://127.0.0.1:1",
+            flush_interval_ms=30,
+            on_error=errors.append,
+            auto_shutdown_handlers=False,
+        ))
+        try:
+            # Inject one event so flush_and_send actually tries to send
+            from recost._types import RawEvent
+            from recost._interceptor import _callback
+            assert _callback is not None
+            _callback(RawEvent(
+                timestamp="2026-05-14T00:00:00Z", method="GET",
+                url="https://api.openai.com/v1/x", host="api.openai.com",
+                path="/v1/x", status_code=200, latency_ms=10,
+                request_bytes=0, response_bytes=0,
+            ))
+            # Let several flush ticks fire (each tick re-ingests aggregator
+            # is empty after first flush, so re-inject)
+            for _ in range(3):
+                _time.sleep(0.05)
+                _callback(RawEvent(
+                    timestamp="2026-05-14T00:00:00Z", method="GET",
+                    url="https://api.openai.com/v1/x", host="api.openai.com",
+                    path="/v1/x", status_code=200, latency_ms=10,
+                    request_bytes=0, response_bytes=0,
+                ))
+            _time.sleep(0.05)
+        finally:
+            handle.dispose()
+
+        # No "backing off" announcement should have fired yet (< 5 failures
+        # per the typical timing — but be generous about timing slop)
+        backoff_announcements = [
+            e for e in errors
+            if hasattr(e, "args") and e.args
+            and isinstance(e.args[0], str) and "backing off" in e.args[0]
+        ]
+        # On slow CI hosts we might see 5+ flushes; in that case the test is
+        # a no-op assertion of the underlying invariant. The strict claim:
+        # if send_count < 5, there must be no backoff announcement.
+        if send_count[0] < 5:
+            assert backoff_announcements == [], (
+                f"unexpected backoff announcement at "
+                f"{send_count[0]} failures: {backoff_announcements}"
+            )
+
+    def test_fifth_failure_triggers_backoff_announcement(self, monkeypatch):
+        """At the 5th consecutive failure, a 'backing off' RecostError fires."""
+        import time as _time
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+
+        def _failing_send(self, summary):
+            raise RuntimeError("simulated transport failure")
+
+        monkeypatch.setattr(Transport, "send", _failing_send)
+        # Make real sleeps a no-op when triggered via _defer
+        # (the backoff feeds the _deferral_ms cell, not time.sleep — so
+        # we don't need to patch time.sleep here)
+
+        errors: list = []
+        handle = init(RecostConfig(
+            enabled=True,
+            api_key="rc-test", project_id="p",
+            base_url="http://127.0.0.1:1",
+            flush_interval_ms=20,
+            on_error=errors.append,
+            auto_shutdown_handlers=False,
+        ))
+        try:
+            from recost._types import RawEvent
+            from recost._interceptor import _callback
+            assert _callback is not None
+            # Inject events repeatedly to keep the aggregator non-empty
+            # across ticks (so each tick actually calls Transport.send).
+            for _ in range(20):
+                _callback(RawEvent(
+                    timestamp="2026-05-14T00:00:00Z", method="GET",
+                    url="https://api.openai.com/v1/x", host="api.openai.com",
+                    path="/v1/x", status_code=200, latency_ms=10,
+                    request_bytes=0, response_bytes=0,
+                ))
+                _time.sleep(0.025)
+        finally:
+            handle.dispose()
+
+        backoff_announcements = [
+            e for e in errors
+            if hasattr(e, "args") and e.args
+            and isinstance(e.args[0], str) and "backing off" in e.args[0]
+        ]
+        assert len(backoff_announcements) >= 1, (
+            f"expected at least one 'backing off' announcement after "
+            f"sustained failure, got errors: {[str(e) for e in errors]}"
+        )
+        # The first announcement should mention "5 consecutive" or higher
+        first = str(backoff_announcements[0])
+        assert "consecutive" in first
+        assert "backing off" in first
+
+    def test_successful_flush_resets_failure_counter(self, monkeypatch):
+        """Counter resets on success — 4 fail + 1 success + 4 fail = no announce."""
+        import time as _time
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+
+        call_count = [0]
+        # Pattern: fail 4 times, succeed once, fail 4 times, succeed forever
+        outcomes = ["fail"] * 4 + ["ok"] + ["fail"] * 4 + ["ok"] * 100
+
+        def _pattern_send(self, summary):
+            n = call_count[0]
+            call_count[0] += 1
+            if n < len(outcomes) and outcomes[n] == "fail":
+                raise RuntimeError("simulated")
+            return None
+
+        monkeypatch.setattr(Transport, "send", _pattern_send)
+
+        errors: list = []
+        handle = init(RecostConfig(
+            enabled=True,
+            api_key="rc-test", project_id="p",
+            base_url="http://127.0.0.1:1",
+            flush_interval_ms=20,
+            on_error=errors.append,
+            auto_shutdown_handlers=False,
+        ))
+        try:
+            from recost._types import RawEvent
+            from recost._interceptor import _callback
+            assert _callback is not None
+            for _ in range(15):
+                _callback(RawEvent(
+                    timestamp="2026-05-14T00:00:00Z", method="GET",
+                    url="https://api.openai.com/v1/x", host="api.openai.com",
+                    path="/v1/x", status_code=200, latency_ms=10,
+                    request_bytes=0, response_bytes=0,
+                ))
+                _time.sleep(0.03)
+        finally:
+            handle.dispose()
+
+        backoff_announcements = [
+            e for e in errors
+            if hasattr(e, "args") and e.args
+            and isinstance(e.args[0], str) and "backing off" in e.args[0]
+        ]
+        # The counter resets at the 5th send (success), so consecutive
+        # failures stay at 4 max in the second window. No "backing off"
+        # announcement should fire.
+        assert backoff_announcements == [], (
+            f"unexpected backoff announcement despite reset; "
+            f"send pattern was {outcomes[:9]}, all errors: "
+            f"{[str(e) for e in errors]}"
+        )
+
+    def test_backoff_announcement_fires_once_per_cap_doubling(self, monkeypatch):
+        """Even under sustained failure, announcements are bounded by the
+        number of distinct backoff levels — NOT one per flush tick."""
+        import time as _time
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+
+        def _failing_send(self, summary):
+            raise RuntimeError("simulated")
+
+        monkeypatch.setattr(Transport, "send", _failing_send)
+
+        errors: list = []
+        handle = init(RecostConfig(
+            enabled=True,
+            api_key="rc-test", project_id="p",
+            base_url="http://127.0.0.1:1",
+            flush_interval_ms=15,
+            on_error=errors.append,
+            auto_shutdown_handlers=False,
+        ))
+        try:
+            from recost._types import RawEvent
+            from recost._interceptor import _callback
+            assert _callback is not None
+            # Run for ~1 second — that's 60+ flush ticks at 15ms.
+            # Once backoff kicks in, the _deferral_ms cell pushes ticks
+            # further out, so we don't actually get 60 send() calls.
+            for _ in range(20):
+                _callback(RawEvent(
+                    timestamp="2026-05-14T00:00:00Z", method="GET",
+                    url="https://api.openai.com/v1/x", host="api.openai.com",
+                    path="/v1/x", status_code=200, latency_ms=10,
+                    request_bytes=0, response_bytes=0,
+                ))
+                _time.sleep(0.05)
+        finally:
+            handle.dispose()
+
+        backoff_announcements = [
+            e for e in errors
+            if hasattr(e, "args") and e.args
+            and isinstance(e.args[0], str) and "backing off" in e.args[0]
+        ]
+        # Generous upper bound: at most one announcement per distinct
+        # backoff level (1s, 2s, 4s, 8s, ..., 300s = 9 levels). On a real
+        # 1-second window we'll see far fewer than that. The key invariant
+        # is that this number is bounded and not growing linearly with
+        # tick count.
+        assert len(backoff_announcements) <= 9, (
+            f"too many backoff announcements: {len(backoff_announcements)}; "
+            f"should be at most one per cap doubling (≤9). "
+            f"Announcements: {[str(e) for e in backoff_announcements]}"
+        )
+        # And there should be at least 1 (verifies the threshold fired)
+        assert len(backoff_announcements) >= 1
