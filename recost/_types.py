@@ -122,6 +122,10 @@ class WindowSummary:
     window_start: str
     window_end: str
     metrics: List[MetricEntry] = field(default_factory=list)
+    protocol_version: str = "1.0"
+    """Wire-format protocol version. Bumped on breaking envelope changes
+    (per #23). Defaults to "1.0" — every transport currently uses one
+    schema. Consumers must reject frames with an unknown MAJOR version."""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to camelCase dict matching the API contract.
@@ -129,8 +133,12 @@ class WindowSummary:
         ``project_id`` lives on the dataclass for in-process use but is NOT
         included on the wire — the API extracts it from the URL path
         (``/projects/{id}/telemetry``). See #16.
+
+        ``protocolVersion`` is the wire-format version (#23). Consumers must
+        reject frames with an unknown MAJOR version.
         """
         return {
+            "protocolVersion": self.protocol_version,
             "environment": self.environment,
             "sdkLanguage": self.sdk_language,
             "sdkVersion": self.sdk_version,

@@ -178,6 +178,7 @@ class Aggregator:
             window_start=window_start,
             window_end=window_end,
             metrics=metrics,
+            protocol_version="1.0",
         )
 
     @property
