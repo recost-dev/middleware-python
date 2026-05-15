@@ -116,10 +116,13 @@ All fields are optional. Pass them as keyword arguments or via a `RecostConfig` 
 | `enabled` | `bool` | `True` | Master kill switch — set `False` to disable entirely. |
 | `custom_providers` | `list[ProviderDef]` | `[]` | Extra provider rules with higher priority than built-ins. |
 | `exclude_patterns` | `list[str]` | `[]` | URL substrings — matching requests are silently dropped. |
+| `exclude_hosts` | `list[str]` | `[]` | Exact host names to exclude (event.host match). Use for unambiguous host-level exclusion without substring false-positives. |
 | `base_url` | `str` | `"https://api.recost.dev"` | Override for self-hosted deployments. |
 | `max_retries` | `int` | `3` | Retry attempts for failed cloud flushes. |
 | `shutdown_flush_timeout_ms` | `int` | `3000` | How long `dispose()` waits for the final flush to complete before closing the transport. |
 | `on_error` | `Callable[[Exception], None]` | — | Called on internal SDK errors. |
+
+> **Note on exclusions:** `exclude_patterns` performs substring matching against both `event.url` and `event.host`; patterns containing `*` raise `ValueError` at init time (substring matching is not glob). For unambiguous host-level exclusion without substring false-positives (e.g., excluding `api.example.com` without also dropping `myapi.example.com`), use `exclude_hosts` instead. Both are applied additively — events matching either are dropped before reaching the aggregator.
 
 ### Custom providers
 
