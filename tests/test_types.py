@@ -53,7 +53,11 @@ def test_window_summary_to_dict_camel_case():
         metrics=[entry],
     )
     d = summary.to_dict()
-    assert d["projectId"] == "proj_123"
+    # projectId is intentionally NOT serialized — the API extracts the
+    # project ID from the URL path (/projects/{id}/telemetry). The
+    # dataclass field stays for in-process diagnostics. See #16.
+    assert "projectId" not in d
+    assert summary.project_id == "proj_123"
     assert d["environment"] == "production"
     assert d["sdkLanguage"] == "python"
     assert d["sdkVersion"] == "0.1.0"

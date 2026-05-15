@@ -24,13 +24,14 @@ and units.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any
 
 import pytest
 
 from recost._aggregator import Aggregator
-from recost._types import RawEvent, WindowSummary
+from recost._types import MetricEntry, RawEvent, WindowSummary, iso_now_ms_z
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +39,8 @@ from recost._types import RawEvent, WindowSummary
 # ---------------------------------------------------------------------------
 
 EXPECTED_TOP_LEVEL_KEYS = sorted([
-    "projectId",
+    # projectId is intentionally absent — the API extracts the project ID
+    # from the URL path (/projects/{id}/telemetry), not the body (#16).
     "environment",
     "sdkLanguage",
     "sdkVersion",
@@ -194,3 +196,61 @@ class TestMetricEntryShape:
                     f"{key} must be int, got {type(v).__name__}"
                 )
                 assert v >= 0
+
+
+# ---------------------------------------------------------------------------
+# Wire-format cleanup (#36 / #16 / #22)
+# ---------------------------------------------------------------------------
+
+
+_MS_Z = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
+
+
+def _make_summary() -> WindowSummary:
+    return WindowSummary(
+        project_id="proj_xyz",
+        environment="test",
+        sdk_language="python",
+        sdk_version="0.0.0",
+        window_start=iso_now_ms_z(),
+        window_end=iso_now_ms_z(),
+        metrics=[MetricEntry(
+            provider="openai", endpoint="/v1/chat/completions",
+            method="POST", request_count=1, error_count=0,
+            total_latency_ms=10, p50_latency_ms=10, p95_latency_ms=10,
+            total_request_bytes=0, total_response_bytes=0,
+            estimated_cost_cents=0.0,
+        )],
+    )
+
+
+def test_wire_format_omits_project_id():
+    """projectId must not appear in the serialized payload (#16).
+    The API extracts it from the URL path; the body field was dead weight."""
+    summary = _make_summary()
+    body = json.dumps(summary.to_dict())
+    assert "projectId" not in body, (
+        f"projectId leaked into serialized body: {body!r}"
+    )
+    # Verify the in-process field is still set (we dropped serialization, not the field)
+    assert summary.project_id == "proj_xyz"
+
+
+def test_wire_format_timestamps_are_ms_z():
+    """windowStart / windowEnd must be ms-precision UTC with Z suffix (#22)."""
+    summary = _make_summary()
+    d = summary.to_dict()
+    assert _MS_Z.fullmatch(d["windowStart"]), (
+        f"windowStart format {d['windowStart']!r} does not match ms+Z"
+    )
+    assert _MS_Z.fullmatch(d["windowEnd"]), (
+        f"windowEnd format {d['windowEnd']!r} does not match ms+Z"
+    )
+
+
+def test_iso_now_ms_z_helper_format():
+    """iso_now_ms_z() must always produce ms+Z (no microseconds, no +00:00)."""
+    ts = iso_now_ms_z()
+    assert _MS_Z.fullmatch(ts), f"iso_now_ms_z() produced {ts!r}"
+    assert "+00:00" not in ts
+    assert ts.endswith("Z")

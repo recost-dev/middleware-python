@@ -115,7 +115,9 @@ class TestCloudTransport:
         req = _CloudHandler.received[0]
         assert req["path"] == "/projects/proj-123/telemetry"
         assert req["auth"] == "Bearer test-key"
-        assert req["body"]["projectId"] == "test-proj"
+        # projectId is intentionally NOT in the body — the API extracts it
+        # from the URL path. See #16.
+        assert "projectId" not in req["body"]
         assert req["body"]["sdkLanguage"] == "python"
 
     def test_no_retry_on_4xx(self, cloud_server):
