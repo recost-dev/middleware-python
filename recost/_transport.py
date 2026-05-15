@@ -356,6 +356,9 @@ class Transport:
                 # before falling back to the generic rejection path.
                 handled = self._handle_cloud_result(result, window_size)
                 if not handled:
+                    # Any non-401 non-429 outcome (403, 404, 422, 5xx) resets
+                    # the auth-failure streak — only consecutive 401s count.
+                    self._consecutive_auth_failures = 0
                     self._report_rejection(result.status, window_size, result.request_id)
                     if result.error is not None and self._on_error is not None:
                         self._on_error(result.error)
@@ -370,6 +373,9 @@ class Transport:
                 status="ok", window_size=window_size, timestamp=_now_ms(),
             )
         except Exception as exc:
+            # Network error is not an auth event — reset the 401 streak so
+            # transient outages don't accumulate toward fatal-suspend.
+            self._consecutive_auth_failures = 0
             msg = f"[recost] transport error (windowSize={window_size}): {exc}"
             logger.warning(msg)
             if self._on_error is not None:

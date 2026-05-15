@@ -785,3 +785,120 @@ class TestConfigurableAuthThreshold:
             max_consecutive_auth_failures=2,
         ))
         assert t._max_consecutive_auth_failures == 2
+
+
+class TestAuthFailureCounterReset:
+    """Counter must reset on every non-401 outcome — only consecutive 401s
+    count toward fatal-suspend."""
+
+    def test_reset_on_non_401_4xx(self, monkeypatch):
+        """A 403/404/422 after 3 prior 401s clears the streak."""
+        from recost._transport import Transport, _CloudResult
+        from recost._types import (
+            RecostConfig, WindowSummary, MetricEntry, iso_now_ms_z,
+        )
+
+        t = Transport(RecostConfig(
+            api_key="rc-test", project_id="p",
+            base_url="http://127.0.0.1:1", max_retries=0,
+            max_consecutive_auth_failures=10,
+        ))
+        t._consecutive_auth_failures = 3
+
+        from recost import _transport
+        def _fake_post(*args, **kwargs):
+            return _CloudResult(status=403, request_id=None, error=None, retry_after_ms=None)
+        monkeypatch.setattr(_transport, "_post_cloud", _fake_post)
+
+        summary = WindowSummary(
+            project_id="p", environment="t", sdk_language="python", sdk_version="0",
+            window_start=iso_now_ms_z(), window_end=iso_now_ms_z(),
+            metrics=[MetricEntry(
+                provider="openai", endpoint="/v1/x", method="POST",
+                request_count=1, error_count=0, total_latency_ms=10,
+                p50_latency_ms=10, p95_latency_ms=10,
+                total_request_bytes=0, total_response_bytes=0,
+                estimated_cost_cents=0.0,
+            )],
+        )
+        t.send(summary)
+
+        assert t._consecutive_auth_failures == 0, (
+            "403 must reset the 401 streak; counter still at "
+            f"{t._consecutive_auth_failures}"
+        )
+
+    def test_reset_on_5xx(self, monkeypatch):
+        """A 500 after 3 prior 401s clears the streak."""
+        from recost._transport import Transport, _CloudResult
+        from recost._types import (
+            RecostConfig, WindowSummary, MetricEntry, iso_now_ms_z,
+        )
+
+        t = Transport(RecostConfig(
+            api_key="rc-test", project_id="p",
+            base_url="http://127.0.0.1:1", max_retries=0,
+            max_consecutive_auth_failures=10,
+        ))
+        t._consecutive_auth_failures = 3
+
+        from recost import _transport
+        def _fake_post(*args, **kwargs):
+            return _CloudResult(status=502, request_id=None, error=None, retry_after_ms=None)
+        monkeypatch.setattr(_transport, "_post_cloud", _fake_post)
+
+        summary = WindowSummary(
+            project_id="p", environment="t", sdk_language="python", sdk_version="0",
+            window_start=iso_now_ms_z(), window_end=iso_now_ms_z(),
+            metrics=[MetricEntry(
+                provider="openai", endpoint="/v1/x", method="POST",
+                request_count=1, error_count=0, total_latency_ms=10,
+                p50_latency_ms=10, p95_latency_ms=10,
+                total_request_bytes=0, total_response_bytes=0,
+                estimated_cost_cents=0.0,
+            )],
+        )
+        t.send(summary)
+
+        assert t._consecutive_auth_failures == 0, (
+            f"5xx must reset the 401 streak; counter still at "
+            f"{t._consecutive_auth_failures}"
+        )
+
+    def test_reset_on_network_throw(self, monkeypatch):
+        """A raised exception (e.g. ConnectionRefusedError) after 3 prior
+        401s clears the streak."""
+        from recost._transport import Transport
+        from recost._types import (
+            RecostConfig, WindowSummary, MetricEntry, iso_now_ms_z,
+        )
+
+        t = Transport(RecostConfig(
+            api_key="rc-test", project_id="p",
+            base_url="http://127.0.0.1:1", max_retries=0,
+            max_consecutive_auth_failures=10,
+        ))
+        t._consecutive_auth_failures = 3
+
+        from recost import _transport
+        def _fake_post(*args, **kwargs):
+            raise ConnectionRefusedError("simulated network drop")
+        monkeypatch.setattr(_transport, "_post_cloud", _fake_post)
+
+        summary = WindowSummary(
+            project_id="p", environment="t", sdk_language="python", sdk_version="0",
+            window_start=iso_now_ms_z(), window_end=iso_now_ms_z(),
+            metrics=[MetricEntry(
+                provider="openai", endpoint="/v1/x", method="POST",
+                request_count=1, error_count=0, total_latency_ms=10,
+                p50_latency_ms=10, p95_latency_ms=10,
+                total_request_bytes=0, total_response_bytes=0,
+                estimated_cost_cents=0.0,
+            )],
+        )
+        t.send(summary)
+
+        assert t._consecutive_auth_failures == 0, (
+            f"Network throw must reset the 401 streak; counter still at "
+            f"{t._consecutive_auth_failures}"
+        )
