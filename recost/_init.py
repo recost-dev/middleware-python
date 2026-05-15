@@ -66,6 +66,33 @@ class RecostHandle:
         self._rebuild(self)
         self.pid = os.getpid()
 
+    def flush_blocking(self, timeout_s: float = 3.0) -> bool:
+        """Run the final flush synchronously and wait up to ``timeout_s`` seconds.
+
+        Companion to ``dispose()`` for callers that need a hard guarantee the
+        last telemetry window was sent before the process exits — e.g. short
+        scripts, ``os._exit()`` shutdown paths, or test teardown that needs
+        deterministic flush settlement.
+
+        Unlike ``dispose()``, this does NOT stop the periodic timer, dispose
+        the transport, or mark the handle as disposed. It is safe to call
+        multiple times and safe to combine with a later ``dispose()`` call.
+
+        Returns True if the flush completed within ``timeout_s``, False if
+        the timeout elapsed first (the flush continues in the background
+        in that case, but its outcome is no longer observable from here).
+
+        Brings Python to parity with Node's async ``await handle.dispose()``,
+        which awaits the final flush by default. See #21.
+        """
+        if self._disposed or self._final_flush is None:
+            return True
+
+        flush_thread = threading.Thread(target=self._final_flush, daemon=True)
+        flush_thread.start()
+        flush_thread.join(timeout=timeout_s)
+        return not flush_thread.is_alive()
+
     def dispose(self) -> None:
         """Stop intercepting, flush remaining events, and close transport connections.
 

@@ -884,3 +884,83 @@ class TestFlushLoopBackoff:
         )
         # And there should be at least 1 (verifies the threshold fired)
         assert len(backoff_announcements) >= 1
+
+
+# ---------------------------------------------------------------------------
+# flush_blocking() — Node-parity sync flush (#21)
+# ---------------------------------------------------------------------------
+
+
+class TestFlushBlocking:
+    """RecostHandle.flush_blocking() runs the final flush synchronously and
+    returns whether it completed within the timeout."""
+
+    def test_flush_blocking_runs_and_returns_true(self, monkeypatch):
+        """A successful flush returns True; the captured summary contains
+        the injected event."""
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+        from recost._types import RawEvent
+
+        sent: list = []
+        monkeypatch.setattr(Transport, "send", lambda self, s: sent.append(s))
+
+        handle = init(RecostConfig(
+            enabled=True,
+            flush_interval_ms=600_000,  # block periodic flush
+            auto_shutdown_handlers=False,
+        ))
+        try:
+            from recost._interceptor import _callback
+            assert _callback is not None
+            _callback(RawEvent(
+                timestamp="2026-05-15T00:00:00.000Z", method="GET",
+                url="https://api.openai.com/v1/x", host="api.openai.com",
+                path="/v1/x", status_code=200, latency_ms=10,
+                request_bytes=0, response_bytes=0,
+            ))
+            ok = handle.flush_blocking(timeout_s=2.0)
+            assert ok is True, "flush_blocking did not complete within 2s"
+            assert len(sent) == 1, (
+                f"expected exactly one summary sent; got {len(sent)}"
+            )
+            assert sum(m.request_count for m in sent[0].metrics) == 1
+            # NOT disposed — handle should still be usable.
+            assert handle._disposed is False
+        finally:
+            handle.dispose()
+
+    def test_flush_blocking_returns_false_on_timeout(self, monkeypatch):
+        """If the flush hangs longer than timeout_s, the method returns False."""
+        import threading as _threading
+        from recost import init, RecostConfig
+        from recost._transport import Transport
+        from recost._types import RawEvent
+
+        block_event = _threading.Event()
+
+        def _slow_send(self, summary):
+            # Park the worker thread until block_event is set by the test.
+            block_event.wait(timeout=5.0)
+
+        monkeypatch.setattr(Transport, "send", _slow_send)
+
+        handle = init(RecostConfig(
+            enabled=True,
+            flush_interval_ms=600_000,
+            auto_shutdown_handlers=False,
+        ))
+        try:
+            from recost._interceptor import _callback
+            assert _callback is not None
+            _callback(RawEvent(
+                timestamp="2026-05-15T00:00:00.000Z", method="GET",
+                url="https://api.openai.com/v1/x", host="api.openai.com",
+                path="/v1/x", status_code=200, latency_ms=10,
+                request_bytes=0, response_bytes=0,
+            ))
+            ok = handle.flush_blocking(timeout_s=0.1)
+            assert ok is False, "flush_blocking should have timed out"
+        finally:
+            block_event.set()  # let the background flush settle
+            handle.dispose()
