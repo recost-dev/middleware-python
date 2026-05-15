@@ -297,6 +297,7 @@ class Transport:
         self._last_flush_status: Optional[FlushStatus] = None
 
         self._consecutive_auth_failures: int = 0
+        self._max_consecutive_auth_failures: int = config.max_consecutive_auth_failures
         self._suspended: bool = False
         self._auth_warned_stderr: bool = False
         self._defer_callback: Optional[Callable[[int], None]] = None
@@ -355,6 +356,9 @@ class Transport:
                 # before falling back to the generic rejection path.
                 handled = self._handle_cloud_result(result, window_size)
                 if not handled:
+                    # Any non-401 non-429 outcome (403, 404, 422, 5xx) resets
+                    # the auth-failure streak — only consecutive 401s count.
+                    self._consecutive_auth_failures = 0
                     self._report_rejection(result.status, window_size, result.request_id)
                     if result.error is not None and self._on_error is not None:
                         self._on_error(result.error)
@@ -369,6 +373,9 @@ class Transport:
                 status="ok", window_size=window_size, timestamp=_now_ms(),
             )
         except Exception as exc:
+            # Network error is not an auth event — reset the 401 streak so
+            # transient outages don't accumulate toward fatal-suspend.
+            self._consecutive_auth_failures = 0
             msg = f"[recost] transport error (windowSize={window_size}): {exc}"
             logger.warning(msg)
             if self._on_error is not None:
@@ -392,9 +399,7 @@ class Transport:
         on 4xx can contain field-level validation detail that hints at
         project / key shape.
         """
-        if status == 401:
-            reason = "API key is invalid or has been revoked. Check RECOST_API_KEY."
-        elif status == 403:
+        if status == 403:
             reason = "API key does not have access to this project. Check RECOST_PROJECT_ID."
         elif status == 404:
             reason = "Project not found. Check RECOST_PROJECT_ID."
@@ -424,8 +429,10 @@ class Transport:
             if not self._auth_warned_stderr:
                 import sys
                 print(
-                    "Recost: API rejected key (401). Telemetry will be dropped. "
-                    "Check your api_key at https://recost.dev/dashboard/account.",
+                    f"[recost] HTTP 401 — API key rejected. Telemetry will "
+                    f"stop after {self._max_consecutive_auth_failures} consecutive "
+                    f"failures. Check your api_key at "
+                    f"https://recost.dev/dashboard/account.",
                     file=sys.stderr,
                 )
                 self._auth_warned_stderr = True
@@ -434,8 +441,18 @@ class Transport:
                     status=401,
                     consecutive_failures=self._consecutive_auth_failures,
                 ))
-            if self._consecutive_auth_failures >= 5:
+            if self._consecutive_auth_failures >= self._max_consecutive_auth_failures:
                 self._suspended = True
+                # Second, distinct stderr line at fatal-suspend so log greps
+                # for "[recost] cloud transport suspended" find this exact
+                # moment regardless of on_error wiring. Matches Node format.
+                import sys
+                print(
+                    f"[recost] cloud transport suspended after "
+                    f"{self._consecutive_auth_failures} consecutive auth "
+                    f"failures. Restart the process after rotating apiKey.",
+                    file=sys.stderr,
+                )
                 if self._on_error is not None:
                     self._on_error(RecostFatalAuthError(
                         status=401,

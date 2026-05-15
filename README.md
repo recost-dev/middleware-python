@@ -120,6 +120,7 @@ All fields are optional. Pass them as keyword arguments or via a `RecostConfig` 
 | `base_url` | `str` | `"https://api.recost.dev"` | Override for self-hosted deployments. |
 | `max_retries` | `int` | `3` | Retry attempts for failed cloud flushes. |
 | `shutdown_flush_timeout_ms` | `int` | `3000` | How long `dispose()` waits for the final flush to complete before closing the transport. |
+| `max_consecutive_auth_failures` | `int` | `5` | Cloud transport suspends after this many consecutive 401 responses. Reset on any non-401 outcome. Matches Node's `maxConsecutiveAuthFailures`. |
 | `on_error` | `Callable[[Exception], None]` | — | Called on internal SDK errors. |
 
 > **Note on exclusions:** `exclude_patterns` performs substring matching against both `event.url` and `event.host`; patterns containing `*` raise `ValueError` at init time (substring matching is not glob). For unambiguous host-level exclusion without substring false-positives (e.g., excluding `api.example.com` without also dropping `myapi.example.com`), use `exclude_hosts` instead. Both are applied additively — events matching either are dropped before reaching the aggregator.
@@ -150,6 +151,30 @@ init(RecostConfig(
 handle = init(RecostConfig(api_key="..."))
 
 # In a test teardown or shutdown handler:
+handle.dispose()
+```
+
+#### `handle.flush_blocking(timeout_s: float = 3.0) -> bool`
+
+Synchronously runs the final flush on the calling thread, bounded by
+`timeout_s` seconds. Returns `True` if the flush completed within the
+budget, `False` on timeout.
+
+Companion to `dispose()` for callers that need a hard ordering guarantee
+the last window was sent — short-lived scripts, `os._exit()` paths,
+test teardown. Unlike `dispose()`, this does NOT stop the periodic
+timer or close the transport, and may be called multiple times. Brings
+Python to parity with Node's `await handle.dispose()`, which awaits
+the final flush by default.
+
+```python
+from recost import init, RecostConfig
+import sys
+
+handle = init(RecostConfig(api_key="..."))
+# ... your code ...
+if not handle.flush_blocking(timeout_s=3.0):
+    print("warning: telemetry flush did not settle within 3s", file=sys.stderr)
 handle.dispose()
 ```
 

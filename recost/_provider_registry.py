@@ -114,10 +114,20 @@ def _host_matches(pattern: str, hostname: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def _refine_twilio(pathname: str) -> tuple[str, float]:
-    """Refine category and cost for Twilio after a host-level match."""
+    """Refine category and cost for Twilio after a host-level match.
+
+    Prices are hard-coded as cents-per-request. Tracked by #24 for future
+    replacement with a sync to a centralized /pricing feed.
+    """
     if "/Messages" in pathname:
+        # Twilio SMS — $0.0079/msg US outbound.
+        # Source: https://www.twilio.com/sms/pricing/us
+        # Last reviewed: 2026-05-15.
         return "sms", 0.79
     if "/Calls" in pathname:
+        # Twilio Voice — $0.013/min US outbound.
+        # Source: https://www.twilio.com/voice/pricing/us
+        # Last reviewed: 2026-05-15.
         return "voice_calls", 1.3
     return pathname, 0.5
 

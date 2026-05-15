@@ -10,7 +10,27 @@ generated the telemetry.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, List, Literal, Optional
+
+
+# ---------------------------------------------------------------------------
+# Time helpers
+# ---------------------------------------------------------------------------
+
+
+def iso_now_ms_z() -> str:
+    """Millisecond-precision UTC ISO 8601 with a trailing ``Z``.
+
+    Matches the wire format Node emits via ``new Date().toISOString()``
+    so cross-SDK consumers see byte-identical timestamps for the same
+    instant. Use everywhere a ``WindowSummary`` timestamp is produced.
+    """
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -104,9 +124,13 @@ class WindowSummary:
     metrics: List[MetricEntry] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to camelCase dict matching the API contract."""
+        """Serialize to camelCase dict matching the API contract.
+
+        ``project_id`` lives on the dataclass for in-process use but is NOT
+        included on the wire — the API extracts it from the URL path
+        (``/projects/{id}/telemetry``). See #16.
+        """
         return {
-            "projectId": self.project_id,
             "environment": self.environment,
             "sdkLanguage": self.sdk_language,
             "sdkVersion": self.sdk_version,
@@ -170,6 +194,11 @@ class RecostConfig:
     shutdown_flush_timeout_ms: int = 3_000
     """How long dispose() waits for the final flush to complete before giving
     up and closing the transport. Matches Node's shutdownFlushTimeoutMs."""
+    max_consecutive_auth_failures: int = 5
+    """How many consecutive 401 responses suspend the cloud transport
+    (after which send() is a silent no-op until process restart).
+    Matches Node's maxConsecutiveAuthFailures. Reset on any non-401
+    outcome — success, non-401 4xx, 5xx, or network error. Defaults to 5."""
     auto_shutdown_handlers: bool = True
     """When True (default), init() registers an atexit handler that runs the
     final flush at normal process termination. Currently only atexit is
