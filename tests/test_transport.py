@@ -1015,3 +1015,102 @@ class TestAuthStderrText:
         t.send(summary)
         captured = capsys.readouterr()
         assert "[recost] cloud transport suspended" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Local file transport (#38)
+# ---------------------------------------------------------------------------
+
+
+class TestLocalFileTransport:
+    """NDJSON-to-disk local transport. New default local mode."""
+
+    def test_writes_ndjson_per_send(self, tmp_path, monkeypatch):
+        """Each send() appends exactly one line; lines are valid JSON."""
+        import json as _json
+        from recost._transport import _LocalFileTransport
+        monkeypatch.setenv("RECOST_LOCAL_DIR", str(tmp_path))
+
+        t = _LocalFileTransport(project_id="proj_a")
+        t.send(_json.dumps({"a": 1}))
+        t.send(_json.dumps({"b": 2}))
+        t.dispose()
+
+        p = tmp_path / "proj_a.jsonl"
+        assert p.exists()
+        lines = p.read_text().splitlines()
+        assert len(lines) == 2
+        assert _json.loads(lines[0]) == {"a": 1}
+        assert _json.loads(lines[1]) == {"b": 2}
+
+    def test_empty_project_id_uses_default_filename(self, tmp_path, monkeypatch):
+        """An empty project_id falls back to 'default.jsonl' so we never
+        produce an unreadable '.jsonl' filename."""
+        from recost._transport import _LocalFileTransport
+        monkeypatch.setenv("RECOST_LOCAL_DIR", str(tmp_path))
+
+        t = _LocalFileTransport(project_id="")
+        t.send('{"x":1}')
+        t.dispose()
+
+        assert (tmp_path / "default.jsonl").exists()
+        assert not (tmp_path / ".jsonl").exists()
+
+    def test_env_var_overrides_default_path(self, tmp_path, monkeypatch):
+        """RECOST_LOCAL_DIR steers the output directory."""
+        from recost._transport import _LocalFileTransport
+        monkeypatch.setenv("RECOST_LOCAL_DIR", str(tmp_path))
+
+        t = _LocalFileTransport(project_id="proj_env")
+        t.send('{"y":2}')
+        t.dispose()
+
+        # The file landed under the env var path, not ~/.recost/...
+        assert (tmp_path / "proj_env.jsonl").exists()
+
+    def test_posix_permissions_are_0o600(self, tmp_path, monkeypatch):
+        """On POSIX systems, the file should be owner-read/write only."""
+        import stat
+        import sys
+        if sys.platform == "win32":
+            import pytest
+            pytest.skip("chmod is a no-op on Windows")
+
+        from recost._transport import _LocalFileTransport
+        monkeypatch.setenv("RECOST_LOCAL_DIR", str(tmp_path))
+
+        t = _LocalFileTransport(project_id="proj_perm")
+        t.send('{"z":3}')
+        t.dispose()
+
+        p = tmp_path / "proj_perm.jsonl"
+        mode = stat.S_IMODE(p.stat().st_mode)
+        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+
+    def test_on_error_fires_once_per_failure_episode(self, tmp_path, monkeypatch):
+        """If the directory can't be created (e.g., we point at a file
+        instead of a dir), on_error fires exactly once per send burst,
+        not per send call."""
+        from recost._transport import _LocalFileTransport
+
+        # Point RECOST_LOCAL_DIR at a path that exists but is a FILE,
+        # which makes Path.mkdir(parents=True, exist_ok=True) raise.
+        blocker = tmp_path / "blocker.txt"
+        blocker.write_text("not a directory")
+        monkeypatch.setenv("RECOST_LOCAL_DIR", str(blocker / "below"))
+
+        errors: list = []
+        t = _LocalFileTransport(project_id="proj_err", on_error=errors.append)
+        # First send fails (open failed at construction; _open_or_warn
+        # already fired on_error, then send retries open and fails again,
+        # but is announced-guarded by self._error_announced).
+        t.send('{"q":1}')
+        t.send('{"q":2}')
+        t.send('{"q":3}')
+        t.dispose()
+
+        # Exactly ONE on_error per failure episode.
+        assert len(errors) == 1, (
+            f"expected exactly 1 on_error per failure episode, got {len(errors)}"
+        )
+        assert isinstance(errors[0], OSError)

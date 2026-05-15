@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import pathlib
 import random
 import threading
 import time
@@ -20,7 +22,7 @@ import urllib.request
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Callable, Optional
+from typing import IO, Callable, Optional
 
 from ._types import FlushStatus, RecostConfig, TransportMode, WindowSummary
 
@@ -275,6 +277,111 @@ class _LocalTransport:
                     f"{self._shutdown_timeout_s}s; FD may leak"
                 )
             self._thread = None
+
+
+# ---------------------------------------------------------------------------
+# Local file transport
+# ---------------------------------------------------------------------------
+
+
+class _LocalFileTransport:
+    """Append-only NDJSON transport for local mode (#38).
+
+    Writes one ``json.dumps(window_summary.to_dict()) + "\\n"`` per send()
+    to ``~/.recost/local-telemetry/{project_id}.jsonl``. Tooling can read
+    the file later; the SDK never reads back.
+
+    Defaults to the new local mode (was WebSocket — see _LocalTransport).
+    The WS target does not exist (recost-dev/extension#91), so writing
+    to disk gives users a working "no cloud account" path.
+
+    POSIX: file is chmod'd to 0o600 on creation.
+    Windows: file ACLs are not adjusted (Python's chmod is mostly a no-op
+    on Windows). Document this in the README.
+
+    Multi-process: POSIX O_APPEND is atomic for writes <= PIPE_BUF (~4 KB
+    on Linux). Larger frames may interleave across processes writing the
+    same file. Documented limitation; sufficient for typical telemetry
+    window sizes.
+
+    Failure modes: PermissionError / OSError (disk full, ENOSPC) fires
+    on_error ONCE per failure-episode (cleared on next successful write)
+    and drops the line. Never raises.
+    """
+
+    def __init__(
+        self,
+        project_id: str,
+        on_error: Optional[Callable[[Exception], None]] = None,
+        debug: bool = False,
+    ) -> None:
+        self._project_id = project_id or "default"
+        self._on_error = on_error
+        self._debug = debug
+        self._path = self._resolve_path()
+        self._fh: Optional[IO[str]] = None
+        self._error_announced = False
+        self._open_or_warn()
+
+    @staticmethod
+    def _resolve_dir() -> pathlib.Path:
+        """``$RECOST_LOCAL_DIR`` if set, else ``~/.recost/local-telemetry/``."""
+        env = os.environ.get("RECOST_LOCAL_DIR")
+        if env:
+            return pathlib.Path(env)
+        return pathlib.Path.home() / ".recost" / "local-telemetry"
+
+    def _resolve_path(self) -> pathlib.Path:
+        return self._resolve_dir() / f"{self._project_id}.jsonl"
+
+    def _open_or_warn(self) -> None:
+        """Open the append handle; announce on_error once per episode if
+        directory creation or file open fails. ``line buffering`` so each
+        ``json.dumps(...) + "\\n"`` write is flushed to disk on newline."""
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            # Open in append text mode with line buffering (newline = flush).
+            self._fh = open(self._path, "a", encoding="utf-8", buffering=1)
+            # POSIX-only: tighten permissions. Best effort — chmod is a
+            # no-op on Windows.
+            try:
+                os.chmod(self._path, 0o600)
+            except OSError:
+                pass
+            self._error_announced = False
+        except OSError as exc:
+            self._announce_once(exc)
+
+    def _announce_once(self, exc: Exception) -> None:
+        if not self._error_announced:
+            self._error_announced = True
+            if self._on_error is not None:
+                self._on_error(exc)
+
+    def send(self, payload: str) -> None:
+        """Append one NDJSON line. ``payload`` is the already-serialized
+        body (the same string the cloud path POSTs). Append a newline."""
+        if self._fh is None:
+            # Failed open at construction; try once more, silently.
+            self._open_or_warn()
+            if self._fh is None:
+                return
+        try:
+            self._fh.write(payload + "\n")
+            # Line buffering flushes on the newline; an explicit flush()
+            # would be belt-and-suspenders but adds a syscall per send.
+        except OSError as exc:
+            self._announce_once(exc)
+
+    def dispose(self) -> None:
+        """Flush and close the file handle. Safe to call multiple times."""
+        if self._fh is not None:
+            try:
+                self._fh.flush()
+                self._fh.close()
+            except OSError:
+                pass
+            self._fh = None
 
 
 # ---------------------------------------------------------------------------
