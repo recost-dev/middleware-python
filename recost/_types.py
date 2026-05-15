@@ -122,6 +122,10 @@ class WindowSummary:
     window_start: str
     window_end: str
     metrics: List[MetricEntry] = field(default_factory=list)
+    protocol_version: str = "1.0"
+    """Wire-format protocol version. Bumped on breaking envelope changes
+    (per #23). Defaults to "1.0" — every transport currently uses one
+    schema. Consumers must reject frames with an unknown MAJOR version."""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to camelCase dict matching the API contract.
@@ -129,8 +133,12 @@ class WindowSummary:
         ``project_id`` lives on the dataclass for in-process use but is NOT
         included on the wire — the API extracts it from the URL path
         (``/projects/{id}/telemetry``). See #16.
+
+        ``protocolVersion`` is the wire-format version (#23). Consumers must
+        reject frames with an unknown MAJOR version.
         """
         return {
+            "protocolVersion": self.protocol_version,
             "environment": self.environment,
             "sdkLanguage": self.sdk_language,
             "sdkVersion": self.sdk_version,
@@ -180,6 +188,12 @@ class RecostConfig:
     Crossing this threshold mid-window triggers an early flush so the API
     does not reject the payload with a 422."""
     local_port: int = 9847
+    local_transport: LocalTransportMode = "file"
+    """Which local-mode transport to use. Default ``file`` — writes NDJSON
+    frames to ~/.recost/local-telemetry/{project_id}.jsonl (or
+    $RECOST_LOCAL_DIR/{project_id}.jsonl if set). ``ws`` opens a
+    WebSocket to localhost:{local_port} — opt-in only, since the VS Code
+    extension does not host a WS server (recost-dev/extension#91)."""
     debug: bool = False
     enabled: bool = True
     custom_providers: List[ProviderDef] = field(default_factory=list)
@@ -214,6 +228,12 @@ class RecostConfig:
 # ---------------------------------------------------------------------------
 
 TransportMode = Literal["local", "cloud"]
+
+LocalTransportMode = Literal["file", "ws"]
+"""Which local-mode transport to use. ``file`` (default) writes NDJSON to
+~/.recost/local-telemetry/{project_id}.jsonl. ``ws`` opens a WebSocket
+to localhost:{local_port} — opt-in, since the VS Code extension does
+not host a WS server (recost-dev/extension#91)."""
 
 
 # ---------------------------------------------------------------------------

@@ -311,7 +311,7 @@ class TestLocalTransportSync:
         within the loop-yield window — no blocking queue.get hanging."""
         pytest.importorskip("websockets")
         port = _find_free_port()
-        transport = Transport(RecostConfig(local_port=port))
+        transport = Transport(RecostConfig(local_port=port, local_transport="ws"))
         assert transport.mode == "local"
         time.sleep(0.2)
         start = time.monotonic()
@@ -1015,3 +1015,305 @@ class TestAuthStderrText:
         t.send(summary)
         captured = capsys.readouterr()
         assert "[recost] cloud transport suspended" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Local file transport (#38)
+# ---------------------------------------------------------------------------
+
+
+class TestLocalFileTransport:
+    """NDJSON-to-disk local transport. New default local mode."""
+
+    def test_writes_ndjson_per_send(self, tmp_path, monkeypatch):
+        """Each send() appends exactly one line; lines are valid JSON."""
+        import json as _json
+        from recost._transport import _LocalFileTransport
+        monkeypatch.setenv("RECOST_LOCAL_DIR", str(tmp_path))
+
+        t = _LocalFileTransport(project_id="proj_a")
+        t.send(_json.dumps({"a": 1}))
+        t.send(_json.dumps({"b": 2}))
+        t.dispose()
+
+        p = tmp_path / "proj_a.jsonl"
+        assert p.exists()
+        lines = p.read_text().splitlines()
+        assert len(lines) == 2
+        assert _json.loads(lines[0]) == {"a": 1}
+        assert _json.loads(lines[1]) == {"b": 2}
+
+    def test_empty_project_id_uses_default_filename(self, tmp_path, monkeypatch):
+        """An empty project_id falls back to 'default.jsonl' so we never
+        produce an unreadable '.jsonl' filename."""
+        from recost._transport import _LocalFileTransport
+        monkeypatch.setenv("RECOST_LOCAL_DIR", str(tmp_path))
+
+        t = _LocalFileTransport(project_id="")
+        t.send('{"x":1}')
+        t.dispose()
+
+        assert (tmp_path / "default.jsonl").exists()
+        assert not (tmp_path / ".jsonl").exists()
+
+    def test_env_var_overrides_default_path(self, tmp_path, monkeypatch):
+        """RECOST_LOCAL_DIR steers the output directory."""
+        from recost._transport import _LocalFileTransport
+        monkeypatch.setenv("RECOST_LOCAL_DIR", str(tmp_path))
+
+        t = _LocalFileTransport(project_id="proj_env")
+        t.send('{"y":2}')
+        t.dispose()
+
+        # The file landed under the env var path, not ~/.recost/...
+        assert (tmp_path / "proj_env.jsonl").exists()
+
+    def test_posix_permissions_are_0o600(self, tmp_path, monkeypatch):
+        """On POSIX systems, the file should be owner-read/write only."""
+        import stat
+        import sys
+        if sys.platform == "win32":
+            import pytest
+            pytest.skip("chmod is a no-op on Windows")
+
+        from recost._transport import _LocalFileTransport
+        monkeypatch.setenv("RECOST_LOCAL_DIR", str(tmp_path))
+
+        t = _LocalFileTransport(project_id="proj_perm")
+        t.send('{"z":3}')
+        t.dispose()
+
+        p = tmp_path / "proj_perm.jsonl"
+        mode = stat.S_IMODE(p.stat().st_mode)
+        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+
+    def test_on_error_fires_once_per_failure_episode(self, tmp_path, monkeypatch):
+        """If the directory can't be created (e.g., we point at a file
+        instead of a dir), on_error fires exactly once per send burst,
+        not per send call."""
+        from recost._transport import _LocalFileTransport
+
+        # Point RECOST_LOCAL_DIR at a path that exists but is a FILE,
+        # which makes Path.mkdir(parents=True, exist_ok=True) raise.
+        blocker = tmp_path / "blocker.txt"
+        blocker.write_text("not a directory")
+        monkeypatch.setenv("RECOST_LOCAL_DIR", str(blocker / "below"))
+
+        errors: list = []
+        t = _LocalFileTransport(project_id="proj_err", on_error=errors.append)
+        # First send fails (open failed at construction; _open_or_warn
+        # already fired on_error, then send retries open and fails again,
+        # but is announced-guarded by self._error_announced).
+        t.send('{"q":1}')
+        t.send('{"q":2}')
+        t.send('{"q":3}')
+        t.dispose()
+
+        # Exactly ONE on_error per failure episode.
+        assert len(errors) == 1, (
+            f"expected exactly 1 on_error per failure episode, got {len(errors)}"
+        )
+        assert isinstance(errors[0], OSError)
+
+
+class TestLocalTransportSelection:
+    """Transport.__init__ picks the right local-mode class based on
+    config.local_transport. Default is 'file' (#38)."""
+
+    def test_default_local_transport_is_file(self, tmp_path, monkeypatch):
+        from recost._transport import Transport, _LocalFileTransport
+        from recost._types import RecostConfig
+
+        monkeypatch.setenv("RECOST_LOCAL_DIR", str(tmp_path))
+        t = Transport(RecostConfig(
+            project_id="proj_default",
+            auto_shutdown_handlers=False,
+        ))
+        try:
+            assert isinstance(t._local, _LocalFileTransport)
+        finally:
+            t.dispose()
+
+    def test_explicit_ws_local_transport_uses_ws(self, monkeypatch):
+        """Setting local_transport='ws' wires the existing WebSocket class."""
+        from recost._transport import Transport, _LocalTransport
+        from recost._types import RecostConfig
+
+        t = Transport(RecostConfig(
+            project_id="proj_ws",
+            local_transport="ws",
+            auto_shutdown_handlers=False,
+        ))
+        try:
+            assert isinstance(t._local, _LocalTransport)
+        finally:
+            t.dispose()
+
+    def test_file_transport_receives_a_real_send(self, tmp_path, monkeypatch):
+        """End-to-end: a Transport in file mode that send()s a real
+        WindowSummary writes one valid NDJSON line containing
+        protocolVersion: '1.0'."""
+        import json as _json
+        from recost._transport import Transport
+        from recost._types import (
+            RecostConfig, WindowSummary, MetricEntry, iso_now_ms_z,
+        )
+
+        monkeypatch.setenv("RECOST_LOCAL_DIR", str(tmp_path))
+        t = Transport(RecostConfig(
+            project_id="proj_e2e",
+            auto_shutdown_handlers=False,
+        ))
+        summary = WindowSummary(
+            project_id="proj_e2e",
+            environment="test",
+            sdk_language="python",
+            sdk_version="0.0.0",
+            window_start=iso_now_ms_z(),
+            window_end=iso_now_ms_z(),
+            metrics=[MetricEntry(
+                provider="openai", endpoint="/v1/x", method="POST",
+                request_count=1, error_count=0, total_latency_ms=10,
+                p50_latency_ms=10, p95_latency_ms=10,
+                total_request_bytes=0, total_response_bytes=0,
+                estimated_cost_cents=0.0,
+            )],
+        )
+        t.send(summary)
+        t.dispose()
+
+        p = tmp_path / "proj_e2e.jsonl"
+        assert p.exists()
+        lines = p.read_text().splitlines()
+        assert len(lines) == 1
+        frame = _json.loads(lines[0])
+        assert frame["protocolVersion"] == "1.0"
+        assert frame["environment"] == "test"
+        assert frame["metrics"][0]["provider"] == "openai"
+
+
+class TestLocalWsQueueCap:
+    """The WS local transport must bound its queue and drop the oldest
+    frame on overflow (#7). Only matters for opt-in WS users now that
+    'file' is the default."""
+
+    def test_queue_caps_at_max_size_with_drop_oldest(self):
+        """When the queue hits max_queue_size, the oldest frame is
+        dropped to make room for the newest."""
+        import asyncio as _asyncio
+        from recost._transport import _LocalTransport
+
+        # Construct without a thread (set _running = False, then attach
+        # our own loop + queue). We're unit-testing the put-with-overflow
+        # logic, not the WS connect path.
+        t = _LocalTransport(port=9999, max_queue_size=3, on_error=lambda e: None)
+        # The constructor may have skipped thread start if websockets is
+        # not installed. Force a clean state for the test either way.
+        t._has_websockets = True  # let send() take the queue path
+        t._running = True
+        loop = _asyncio.new_event_loop()
+        t._loop = loop
+        t._queue = _asyncio.Queue(maxsize=3)
+        try:
+            # 5 sends with cap=3 → final queue holds the 3 newest payloads.
+            for i in range(5):
+                t.send(f"frame-{i}")
+                # Pump the loop once so the scheduled coroutine actually
+                # runs (run_coroutine_threadsafe would block waiting for
+                # a running loop; we drive it manually instead).
+                loop.run_until_complete(_asyncio.sleep(0))
+
+            drained = []
+            while not t._queue.empty():
+                drained.append(t._queue.get_nowait())
+            assert drained == ["frame-2", "frame-3", "frame-4"], drained
+        finally:
+            loop.close()
+
+    def test_first_overflow_fires_on_error_once(self):
+        """The first dropped frame in an episode fires on_error; further
+        drops in the same episode do NOT re-fire."""
+        import asyncio as _asyncio
+        from recost._transport import _LocalTransport
+
+        errors: list = []
+        t = _LocalTransport(port=9999, max_queue_size=2, on_error=errors.append)
+        t._has_websockets = True
+        t._running = True
+        loop = _asyncio.new_event_loop()
+        t._loop = loop
+        t._queue = _asyncio.Queue(maxsize=2)
+        try:
+            for i in range(5):
+                t.send(f"frame-{i}")
+                loop.run_until_complete(_asyncio.sleep(0))
+                # call_soon callbacks run on the next loop iteration; pump again.
+                loop.run_until_complete(_asyncio.sleep(0))
+
+            # 3 overflow events (frames 2, 3, 4 each evict one) but only
+            # the first should fire on_error.
+            assert len(errors) == 1, f"expected 1 error, got {len(errors)}: {errors}"
+            msg = str(errors[0])
+            assert "queue full" in msg
+            assert "cap=2" in msg
+        finally:
+            loop.close()
+
+
+class TestLocalWsReconnectCap:
+    """The WS local transport must give up after N failed connects and
+    fire on_error once (#7). Only matters for opt-in WS users."""
+
+    def test_gives_up_after_max_reconnect_attempts(self):
+        """When the server is unreachable, the loop stops after
+        max_reconnect_attempts failures and fires on_error once."""
+        import time as _time
+        from recost._transport import _LocalTransport
+
+        # Skip if websockets isn't installed — the transport never starts.
+        try:
+            import websockets  # noqa: F401
+        except ImportError:
+            import pytest
+            pytest.skip("websockets package not installed")
+
+        errors: list = []
+        # port 1 is reserved; connect will fail immediately.
+        t = _LocalTransport(
+            port=1,
+            on_error=errors.append,
+            max_reconnect_attempts=3,
+            shutdown_timeout_s=5.0,
+        )
+        try:
+            # Reconnect backoff: 0.5s, 1s, 2s, 4s (jittered) — so 4 attempts
+            # finish within ~10s in the worst case.
+            deadline = _time.time() + 15.0
+            while _time.time() < deadline and t._running:
+                _time.sleep(0.1)
+            assert not t._running, "transport did not give up within 15s"
+        finally:
+            t.dispose()
+
+        assert len(errors) == 1, f"expected 1 error, got {len(errors)}: {errors}"
+        msg = str(errors[0])
+        assert "gave up" in msg
+        assert "127.0.0.1:1" in msg
+        assert "local_transport='file'" in msg
+
+    def test_successful_connect_resets_attempt_counter(self):
+        """A successful connect zeros reconnect_attempts so a later
+        disconnect doesn't pick up where the last failure left off.
+
+        This is implicitly tested by inspection — the existing
+        '_run' / '_ws_loop' sets reconnect_attempts = 0 inside the
+        `async with websockets.connect(...) as ws:` block. We verify
+        the line is still present after the refactor.
+        """
+        import inspect
+        from recost._transport import _LocalTransport
+
+        src = inspect.getsource(_LocalTransport._ws_loop)
+        assert "reconnect_attempts = 0" in src, (
+            "_ws_loop must reset reconnect_attempts on successful connect"
+        )

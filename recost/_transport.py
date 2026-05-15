@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import pathlib
 import random
 import threading
 import time
@@ -20,7 +22,7 @@ import urllib.request
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Callable, Optional
+from typing import IO, Callable, Optional, Union
 
 from ._types import FlushStatus, RecostConfig, TransportMode, WindowSummary
 
@@ -138,10 +140,17 @@ class _LocalTransport:
         port: int,
         debug: bool = False,
         shutdown_timeout_s: float = 3.0,
+        on_error: Optional[Callable[[Exception], None]] = None,
+        max_queue_size: int = 1000,
+        max_reconnect_attempts: int = 10,
     ) -> None:
         self._port = port
         self._debug = debug
         self._shutdown_timeout_s = shutdown_timeout_s
+        self._on_error = on_error
+        self._max_queue_size = max_queue_size
+        self._max_reconnect_attempts = max_reconnect_attempts
+        self._drop_announced = False
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -170,7 +179,7 @@ class _LocalTransport:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._loop = loop
-        self._queue = asyncio.Queue()
+        self._queue = asyncio.Queue(maxsize=self._max_queue_size)
         self._ready.set()
         try:
             loop.run_until_complete(self._ws_loop())
@@ -205,6 +214,7 @@ class _LocalTransport:
             try:
                 async with websockets.connect(url) as ws:
                     reconnect_attempts = 0
+                    self._drop_announced = False  # New episode after reconnect.
                     while self._running:
                         try:
                             msg = await asyncio.wait_for(self._queue.get(), timeout=0.5)
@@ -225,9 +235,28 @@ class _LocalTransport:
             except Exception:
                 if not self._running:
                     return
-                base = min(0.5 * (2 ** reconnect_attempts), 30.0)
-                delay = base * (1 + (random.random() - 0.5) * 0.5)  # 0.75x..1.25x
                 reconnect_attempts += 1
+                if reconnect_attempts > self._max_reconnect_attempts:
+                    # Give up. Announce via on_error and stop the loop.
+                    self._running = False
+                    if self._on_error is not None:
+                        from ._types import RecostError
+                        cb = self._on_error
+                        port = self._port
+                        attempts = reconnect_attempts - 1
+                        try:
+                            cb(RecostError(
+                                f"recost: local WS transport gave up after "
+                                f"{attempts} failed connects to "
+                                f"127.0.0.1:{port}. Set local_transport='file' "
+                                f"to write telemetry to disk instead."
+                            ))
+                        except Exception:
+                            # User callback raised — never crash the loop.
+                            pass
+                    return
+                base = min(0.5 * (2 ** (reconnect_attempts - 1)), 30.0)
+                delay = base * (1 + (random.random() - 0.5) * 0.5)  # 0.75x..1.25x
                 await asyncio.sleep(delay)
 
     def send(self, payload: str) -> None:
@@ -237,8 +266,45 @@ class _LocalTransport:
         queue_ = self._queue
         if loop is None or queue_ is None or loop.is_closed():
             return
+        # Bounded queue with drop-oldest semantics. Schedule a coroutine
+        # that, on QueueFull, drains one element and retries put_nowait.
+        async def _put_with_overflow() -> None:
+            assert queue_ is not None  # local for mypy after capture
+            try:
+                queue_.put_nowait(payload)
+            except asyncio.QueueFull:
+                # Drop the oldest queued frame and put the new one.
+                try:
+                    queue_.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    queue_.put_nowait(payload)
+                except asyncio.QueueFull:
+                    # Should be unreachable after the get_nowait; treat as
+                    # silent drop rather than crashing the loop.
+                    return
+                # Announce once per overflow episode; cleared on reconnect.
+                if not self._drop_announced:
+                    self._drop_announced = True
+                    if self._on_error is not None:
+                        # Capture for the cross-thread schedule below
+                        loop_local = self._loop
+                        if loop_local is not None:
+                            from ._types import RecostError
+                            cb = self._on_error
+                            # Schedule the user callback via call_soon to
+                            # avoid running it inside the asyncio loop's
+                            # body (matches the rest of the file's pattern).
+                            loop_local.call_soon(
+                                lambda: cb(RecostError(
+                                    "recost: local WS queue full; dropping "
+                                    f"oldest frame (cap={self._max_queue_size})"
+                                ))
+                            )
+
         try:
-            asyncio.run_coroutine_threadsafe(queue_.put(payload), loop)
+            asyncio.run_coroutine_threadsafe(_put_with_overflow(), loop)
         except RuntimeError:
             # Loop was closed between the is_closed() check and the schedule.
             pass
@@ -278,6 +344,111 @@ class _LocalTransport:
 
 
 # ---------------------------------------------------------------------------
+# Local file transport
+# ---------------------------------------------------------------------------
+
+
+class _LocalFileTransport:
+    """Append-only NDJSON transport for local mode (#38).
+
+    Writes one ``json.dumps(window_summary.to_dict()) + "\\n"`` per send()
+    to ``~/.recost/local-telemetry/{project_id}.jsonl``. Tooling can read
+    the file later; the SDK never reads back.
+
+    Defaults to the new local mode (was WebSocket — see _LocalTransport).
+    The WS target does not exist (recost-dev/extension#91), so writing
+    to disk gives users a working "no cloud account" path.
+
+    POSIX: file is chmod'd to 0o600 on creation.
+    Windows: file ACLs are not adjusted (Python's chmod is mostly a no-op
+    on Windows). Document this in the README.
+
+    Multi-process: POSIX O_APPEND is atomic for writes <= PIPE_BUF (~4 KB
+    on Linux). Larger frames may interleave across processes writing the
+    same file. Documented limitation; sufficient for typical telemetry
+    window sizes.
+
+    Failure modes: PermissionError / OSError (disk full, ENOSPC) fires
+    on_error ONCE per failure-episode (cleared on next successful write)
+    and drops the line. Never raises.
+    """
+
+    def __init__(
+        self,
+        project_id: str,
+        on_error: Optional[Callable[[Exception], None]] = None,
+        debug: bool = False,
+    ) -> None:
+        self._project_id = project_id or "default"
+        self._on_error = on_error
+        self._debug = debug
+        self._path = self._resolve_path()
+        self._fh: Optional[IO[str]] = None
+        self._error_announced = False
+        self._open_or_warn()
+
+    @staticmethod
+    def _resolve_dir() -> pathlib.Path:
+        """``$RECOST_LOCAL_DIR`` if set, else ``~/.recost/local-telemetry/``."""
+        env = os.environ.get("RECOST_LOCAL_DIR")
+        if env:
+            return pathlib.Path(env)
+        return pathlib.Path.home() / ".recost" / "local-telemetry"
+
+    def _resolve_path(self) -> pathlib.Path:
+        return self._resolve_dir() / f"{self._project_id}.jsonl"
+
+    def _open_or_warn(self) -> None:
+        """Open the append handle; announce on_error once per episode if
+        directory creation or file open fails. ``line buffering`` so each
+        ``json.dumps(...) + "\\n"`` write is flushed to disk on newline."""
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            # Open in append text mode with line buffering (newline = flush).
+            self._fh = open(self._path, "a", encoding="utf-8", buffering=1)
+            # POSIX-only: tighten permissions. Best effort — chmod is a
+            # no-op on Windows.
+            try:
+                os.chmod(self._path, 0o600)
+            except OSError:
+                pass
+            self._error_announced = False
+        except OSError as exc:
+            self._announce_once(exc)
+
+    def _announce_once(self, exc: Exception) -> None:
+        if not self._error_announced:
+            self._error_announced = True
+            if self._on_error is not None:
+                self._on_error(exc)
+
+    def send(self, payload: str) -> None:
+        """Append one NDJSON line. ``payload`` is the already-serialized
+        body (the same string the cloud path POSTs). Append a newline."""
+        if self._fh is None:
+            # Failed open at construction; try once more, silently.
+            self._open_or_warn()
+            if self._fh is None:
+                return
+        try:
+            self._fh.write(payload + "\n")
+            # Line buffering flushes on the newline; an explicit flush()
+            # would be belt-and-suspenders but adds a syscall per send.
+        except OSError as exc:
+            self._announce_once(exc)
+
+    def dispose(self) -> None:
+        """Flush and close the file handle. Safe to call multiple times."""
+        if self._fh is not None:
+            try:
+                self._fh.flush()
+                self._fh.close()
+            except OSError:
+                pass
+            self._fh = None
+
+
+# ---------------------------------------------------------------------------
 # Transport class
 # ---------------------------------------------------------------------------
 
@@ -302,13 +473,25 @@ class Transport:
         self._auth_warned_stderr: bool = False
         self._defer_callback: Optional[Callable[[int], None]] = None
 
-        self._local: Optional[_LocalTransport] = None
+        # Local-mode transport: file (default) or ws (opt-in, see #38).
+        # The attribute is typed as the union of both — both expose
+        # send(payload: str) and dispose() so the rest of Transport
+        # doesn't care which one is wired.
+        self._local: Optional[Union[_LocalFileTransport, _LocalTransport]] = None
         if self.mode == "local":
-            self._local = _LocalTransport(
-                config.local_port,
-                config.debug,
-                shutdown_timeout_s=config.shutdown_flush_timeout_ms / 1000.0,
-            )
+            if config.local_transport == "file":
+                self._local = _LocalFileTransport(
+                    project_id=config.project_id or "",
+                    on_error=config.on_error,
+                    debug=config.debug,
+                )
+            else:  # "ws" — opt-in
+                self._local = _LocalTransport(
+                    config.local_port,
+                    config.debug,
+                    shutdown_timeout_s=config.shutdown_flush_timeout_ms / 1000.0,
+                    on_error=config.on_error,
+                )
 
     @property
     def last_flush_status(self) -> Optional[FlushStatus]:

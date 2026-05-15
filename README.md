@@ -112,6 +112,7 @@ All fields are optional. Pass them as keyword arguments or via a `RecostConfig` 
 | `max_batch_size` | `int` | `100` | Early-flush threshold (number of events). |
 | `max_buckets` | `int` | `2000` | Maximum unique (provider, endpoint, method) triplets per window. Crossing this triggers an early flush. |
 | `local_port` | `int` | `9847` | WebSocket port for the VS Code extension. |
+| `local_transport` | `Literal["file", "ws"]` | `"file"` | Which local-mode transport to use. `"file"` (default) writes NDJSON to `~/.recost/local-telemetry/{project_id}.jsonl`. `"ws"` opts into a WebSocket to `localhost:{local_port}` (no server hosts this by default — see [extension#91](https://github.com/recost-dev/extension/issues/91)). |
 | `debug` | `bool` | `False` | Log telemetry activity to stderr. |
 | `enabled` | `bool` | `True` | Master kill switch — set `False` to disable entirely. |
 | `custom_providers` | `list[ProviderDef]` | `[]` | Extra provider rules with higher priority than built-ins. |
@@ -124,6 +125,39 @@ All fields are optional. Pass them as keyword arguments or via a `RecostConfig` 
 | `on_error` | `Callable[[Exception], None]` | — | Called on internal SDK errors. |
 
 > **Note on exclusions:** `exclude_patterns` performs substring matching against both `event.url` and `event.host`; patterns containing `*` raise `ValueError` at init time (substring matching is not glob). For unambiguous host-level exclusion without substring false-positives (e.g., excluding `api.example.com` without also dropping `myapi.example.com`), use `exclude_hosts` instead. Both are applied additively — events matching either are dropped before reaching the aggregator.
+
+### Local-mode transports
+
+When no `api_key` is set, the SDK runs in **local mode**. Two transports are available:
+
+#### File (default — recommended)
+
+`local_transport="file"`: each `WindowSummary` is appended as one NDJSON line to:
+
+```
+$RECOST_LOCAL_DIR/{project_id}.jsonl     # if RECOST_LOCAL_DIR is set
+~/.recost/local-telemetry/{project_id}.jsonl  # otherwise (POSIX & macOS)
+```
+
+If `project_id` is empty, the file is named `default.jsonl`.
+
+On POSIX systems the file is `chmod`'d to `0o600` (owner read/write only). On Windows, the ACL is not adjusted — Python's `chmod` is mostly a no-op there.
+
+Multi-process writes from different processes targeting the same `project_id` are safe for typical telemetry frames (POSIX `O_APPEND` is atomic for writes ≤ `PIPE_BUF`, ~4 KB on Linux). Very large frames may interleave across processes.
+
+If the directory can't be created or the file can't be opened (`PermissionError`, disk full), `on_error` fires once per failure-episode and subsequent writes are silently dropped until the next successful write.
+
+#### WebSocket (opt-in)
+
+`local_transport="ws"`: opens `ws://127.0.0.1:{local_port}` (default port 9847). The VS Code extension does not currently host a WS server, so this is only useful if you've stood up your own listener.
+
+Hardening for opt-in WS users:
+- Outbound queue is capped at 1000 frames with drop-oldest semantics. The first dropped frame fires `on_error` once per overflow episode (cleared on reconnect).
+- After 10 consecutive failed reconnect attempts, the transport gives up and fires `on_error` once with a message pointing back to `local_transport="file"`.
+
+#### Wire format
+
+Every frame on every transport carries a top-level `protocolVersion: "1.0"` field. Consumers must reject frames with an unknown MAJOR version; MINOR bumps are forward-compatible.
 
 ### Custom providers
 

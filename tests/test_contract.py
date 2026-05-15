@@ -41,6 +41,7 @@ from recost._types import MetricEntry, RawEvent, WindowSummary, iso_now_ms_z
 EXPECTED_TOP_LEVEL_KEYS = sorted([
     # projectId is intentionally absent — the API extracts the project ID
     # from the URL path (/projects/{id}/telemetry), not the body (#16).
+    "protocolVersion",  # wire-format version, added in #23
     "environment",
     "sdkLanguage",
     "sdkVersion",
@@ -254,3 +255,17 @@ def test_iso_now_ms_z_helper_format():
     assert _MS_Z.fullmatch(ts), f"iso_now_ms_z() produced {ts!r}"
     assert "+00:00" not in ts
     assert ts.endswith("Z")
+
+
+def test_wire_format_includes_protocol_version():
+    """protocolVersion: '1.0' must appear in the serialized body (#23).
+    Allows future MAJOR bumps to break out-of-version consumers cleanly."""
+    summary = _make_summary()  # helper added in Wave C-2/C-3
+    d = summary.to_dict()
+    assert d.get("protocolVersion") == "1.0", (
+        f"protocolVersion missing or wrong: got {d.get('protocolVersion')!r}"
+    )
+    # And verify it survives a JSON round-trip
+    import json as _json
+    body = _json.loads(_json.dumps(d))
+    assert body["protocolVersion"] == "1.0"

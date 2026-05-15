@@ -7,10 +7,11 @@ to the Recost dashboard or your local VS Code extension.
 
 from ._types import (
     FlushStatus,
-    RecostConfig,
+    LocalTransportMode,
     MetricEntry,
     ProviderDef,
     RawEvent,
+    RecostConfig,
     RecostError,
     RecostAuthError,
     RecostFatalAuthError,
@@ -36,6 +37,7 @@ __all__ = [
     "RecostFatalAuthError",
     "RecostRateLimitError",
     "TransportMode",
+    "LocalTransportMode",
     "FlushStatus",
     "ProviderRegistry",
     "BUILTIN_PROVIDERS",
