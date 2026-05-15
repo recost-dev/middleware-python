@@ -11,10 +11,9 @@ from __future__ import annotations
 import math
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from ._types import MetricEntry, RawEvent, WindowSummary
+from ._types import MetricEntry, RawEvent, WindowSummary, iso_now_ms_z
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +148,7 @@ class Aggregator:
             self._size = 0
 
         # Outside the lock: format timestamps and build the summary.
-        window_end = datetime.now(timezone.utc).isoformat()
+        window_end = iso_now_ms_z()
         window_start = window_start_captured or window_end
 
         metrics: List[MetricEntry] = []
