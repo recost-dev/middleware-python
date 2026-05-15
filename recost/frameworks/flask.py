@@ -39,6 +39,9 @@ try:
             config: Optional[RecostConfig] = None,
             **kwargs: Any,
         ) -> None:
+            if self._handle is not None:
+                self._handle.dispose()
+                self._handle = None
             if config is None:
                 config = RecostConfig(**kwargs)
             self._handle = init(config)

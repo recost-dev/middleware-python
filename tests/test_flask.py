@@ -94,3 +94,49 @@ def test_flask_extension_raises_clear_error_without_flask(monkeypatch) -> None:
     finally:
         monkeypatch.undo()
         importlib.reload(flask_mod)
+
+
+class TestInitAppDisposePrevious:
+    """init_app() must dispose self._handle before reassigning so the
+    extension instance never carries a stale handle reference."""
+
+    def test_init_app_disposes_previous_handle(self):
+        from flask import Flask
+        from recost.frameworks.flask import RecostExtension
+
+        ext = RecostExtension()
+        try:
+            app1 = Flask("app1")
+            ext.init_app(app1, config=RecostConfig(enabled=True))
+            first_handle = ext._handle
+            assert first_handle is not None
+            assert first_handle._disposed is False
+
+            app2 = Flask("app2")
+            ext.init_app(app2, config=RecostConfig(enabled=True))
+            second_handle = ext._handle
+
+            assert first_handle._disposed is True, (
+                "previous handle was not disposed when init_app ran again"
+            )
+            assert second_handle is not first_handle
+            assert second_handle is not None
+            assert second_handle._disposed is False
+        finally:
+            uninstall()
+
+    def test_init_app_idempotent_when_no_previous_handle(self):
+        """First-time init_app on a fresh extension must work — the
+        dispose-previous branch is skipped when self._handle is None."""
+        from flask import Flask
+        from recost.frameworks.flask import RecostExtension
+
+        ext = RecostExtension()  # no app, self._handle stays None
+        try:
+            app = Flask(__name__)
+            ext.init_app(app, config=RecostConfig(enabled=True))
+            assert ext._handle is not None
+            assert ext._handle._disposed is False
+            assert is_installed()
+        finally:
+            uninstall()
