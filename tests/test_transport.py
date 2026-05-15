@@ -1190,3 +1190,71 @@ class TestLocalTransportSelection:
         assert frame["protocolVersion"] == "1.0"
         assert frame["environment"] == "test"
         assert frame["metrics"][0]["provider"] == "openai"
+
+
+class TestLocalWsQueueCap:
+    """The WS local transport must bound its queue and drop the oldest
+    frame on overflow (#7). Only matters for opt-in WS users now that
+    'file' is the default."""
+
+    def test_queue_caps_at_max_size_with_drop_oldest(self):
+        """When the queue hits max_queue_size, the oldest frame is
+        dropped to make room for the newest."""
+        import asyncio as _asyncio
+        from recost._transport import _LocalTransport
+
+        # Construct without a thread (set _running = False, then attach
+        # our own loop + queue). We're unit-testing the put-with-overflow
+        # logic, not the WS connect path.
+        t = _LocalTransport(port=9999, max_queue_size=3, on_error=lambda e: None)
+        # The constructor may have skipped thread start if websockets is
+        # not installed. Force a clean state for the test either way.
+        t._has_websockets = True  # let send() take the queue path
+        t._running = True
+        loop = _asyncio.new_event_loop()
+        t._loop = loop
+        t._queue = _asyncio.Queue(maxsize=3)
+        try:
+            # 5 sends with cap=3 → final queue holds the 3 newest payloads.
+            for i in range(5):
+                t.send(f"frame-{i}")
+                # Pump the loop once so the scheduled coroutine actually
+                # runs (run_coroutine_threadsafe would block waiting for
+                # a running loop; we drive it manually instead).
+                loop.run_until_complete(_asyncio.sleep(0))
+
+            drained = []
+            while not t._queue.empty():
+                drained.append(t._queue.get_nowait())
+            assert drained == ["frame-2", "frame-3", "frame-4"], drained
+        finally:
+            loop.close()
+
+    def test_first_overflow_fires_on_error_once(self):
+        """The first dropped frame in an episode fires on_error; further
+        drops in the same episode do NOT re-fire."""
+        import asyncio as _asyncio
+        from recost._transport import _LocalTransport
+
+        errors: list = []
+        t = _LocalTransport(port=9999, max_queue_size=2, on_error=errors.append)
+        t._has_websockets = True
+        t._running = True
+        loop = _asyncio.new_event_loop()
+        t._loop = loop
+        t._queue = _asyncio.Queue(maxsize=2)
+        try:
+            for i in range(5):
+                t.send(f"frame-{i}")
+                loop.run_until_complete(_asyncio.sleep(0))
+                # call_soon callbacks run on the next loop iteration; pump again.
+                loop.run_until_complete(_asyncio.sleep(0))
+
+            # 3 overflow events (frames 2, 3, 4 each evict one) but only
+            # the first should fire on_error.
+            assert len(errors) == 1, f"expected 1 error, got {len(errors)}: {errors}"
+            msg = str(errors[0])
+            assert "queue full" in msg
+            assert "cap=2" in msg
+        finally:
+            loop.close()

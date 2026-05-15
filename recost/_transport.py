@@ -140,10 +140,15 @@ class _LocalTransport:
         port: int,
         debug: bool = False,
         shutdown_timeout_s: float = 3.0,
+        on_error: Optional[Callable[[Exception], None]] = None,
+        max_queue_size: int = 1000,
     ) -> None:
         self._port = port
         self._debug = debug
         self._shutdown_timeout_s = shutdown_timeout_s
+        self._on_error = on_error
+        self._max_queue_size = max_queue_size
+        self._drop_announced = False
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -172,7 +177,7 @@ class _LocalTransport:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._loop = loop
-        self._queue = asyncio.Queue()
+        self._queue = asyncio.Queue(maxsize=self._max_queue_size)
         self._ready.set()
         try:
             loop.run_until_complete(self._ws_loop())
@@ -207,6 +212,7 @@ class _LocalTransport:
             try:
                 async with websockets.connect(url) as ws:
                     reconnect_attempts = 0
+                    self._drop_announced = False  # New episode after reconnect.
                     while self._running:
                         try:
                             msg = await asyncio.wait_for(self._queue.get(), timeout=0.5)
@@ -239,8 +245,45 @@ class _LocalTransport:
         queue_ = self._queue
         if loop is None or queue_ is None or loop.is_closed():
             return
+        # Bounded queue with drop-oldest semantics. Schedule a coroutine
+        # that, on QueueFull, drains one element and retries put_nowait.
+        async def _put_with_overflow() -> None:
+            assert queue_ is not None  # local for mypy after capture
+            try:
+                queue_.put_nowait(payload)
+            except asyncio.QueueFull:
+                # Drop the oldest queued frame and put the new one.
+                try:
+                    queue_.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    queue_.put_nowait(payload)
+                except asyncio.QueueFull:
+                    # Should be unreachable after the get_nowait; treat as
+                    # silent drop rather than crashing the loop.
+                    return
+                # Announce once per overflow episode; cleared on reconnect.
+                if not self._drop_announced:
+                    self._drop_announced = True
+                    if self._on_error is not None:
+                        # Capture for the cross-thread schedule below
+                        loop_local = self._loop
+                        if loop_local is not None:
+                            from ._types import RecostError
+                            cb = self._on_error
+                            # Schedule the user callback via call_soon to
+                            # avoid running it inside the asyncio loop's
+                            # body (matches the rest of the file's pattern).
+                            loop_local.call_soon(
+                                lambda: cb(RecostError(
+                                    "recost: local WS queue full; dropping "
+                                    f"oldest frame (cap={self._max_queue_size})"
+                                ))
+                            )
+
         try:
-            asyncio.run_coroutine_threadsafe(queue_.put(payload), loop)
+            asyncio.run_coroutine_threadsafe(_put_with_overflow(), loop)
         except RuntimeError:
             # Loop was closed between the is_closed() check and the schedule.
             pass
@@ -426,6 +469,7 @@ class Transport:
                     config.local_port,
                     config.debug,
                     shutdown_timeout_s=config.shutdown_flush_timeout_ms / 1000.0,
+                    on_error=config.on_error,
                 )
 
     @property
