@@ -86,7 +86,7 @@ def _post_cloud(
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {api_key}",
-                    "User-Agent": "recost-python/0.1.0",
+                    "User-Agent": "recost-python/0.1.3",
                 },
                 method="POST",
             )

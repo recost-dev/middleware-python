@@ -122,7 +122,10 @@ All fields are optional. Pass them as keyword arguments or via a `RecostConfig` 
 | `max_retries` | `int` | `3` | Retry attempts for failed cloud flushes. |
 | `shutdown_flush_timeout_ms` | `int` | `3000` | How long `dispose()` waits for the final flush to complete before closing the transport. |
 | `max_consecutive_auth_failures` | `int` | `5` | Cloud transport suspends after this many consecutive 401 responses. Reset on any non-401 outcome. Matches Node's `maxConsecutiveAuthFailures`. |
-| `on_error` | `Callable[[Exception], None]` | — | Called on internal SDK errors. |
+| `auto_shutdown_handlers` | `bool` | `True` | When `True`, `init()` registers an `atexit` hook that runs the final flush at normal process termination. Set `False` if the host application manages its own lifecycle and does not want recost touching `atexit`. |
+| `on_error` | `Callable[[Exception], None]` | — | Called on internal SDK errors. See [Error handling](#error-handling) for the typed exception classes you can dispatch on. |
+
+> **Note on `api_key`:** must be a string beginning with `rc-`. `init()` raises `ValueError` at startup otherwise — telemetry is never silently sent with a malformed key.
 
 > **Note on exclusions:** `exclude_patterns` performs substring matching against both `event.url` and `event.host`; patterns containing `*` raise `ValueError` at init time (substring matching is not glob). For unambiguous host-level exclusion without substring false-positives (e.g., excluding `api.example.com` without also dropping `myapi.example.com`), use `exclude_hosts` instead. Both are applied additively — events matching either are dropped before reaching the aggregator.
 
@@ -221,6 +224,63 @@ from recost import init, RecostConfig
 init(RecostConfig(enabled=os.environ.get("PYTHON_ENV") != "test"))
 ```
 
+## Error handling
+
+`on_error` receives both arbitrary `Exception` instances and four typed errors you can dispatch on. All four inherit from `RecostError`, which itself inherits from `Exception`.
+
+```python
+from recost import (
+    init, RecostConfig,
+    RecostError, RecostAuthError, RecostFatalAuthError, RecostRateLimitError,
+)
+
+def on_error(exc: Exception) -> None:
+    if isinstance(exc, RecostFatalAuthError):
+        # Transport has suspended itself — telemetry stops until process restart.
+        # Rotate the API key, ship a new build, then restart.
+        page_on_call(exc)
+    elif isinstance(exc, RecostAuthError):
+        # 401 received but not yet at the fatal threshold.
+        log.warning("recost: auth failure %d/%d", exc.consecutive_failures, 5)
+    elif isinstance(exc, RecostRateLimitError):
+        # 429 received — the SDK has already deferred the next flush.
+        log.info("recost: rate-limited, deferred %dms", exc.retry_after_ms)
+    elif isinstance(exc, RecostError):
+        log.info("recost: %s", exc)
+
+init(RecostConfig(api_key="...", on_error=on_error))
+```
+
+- `RecostAuthError(status, consecutive_failures)` — fired on every 401 response.
+- `RecostFatalAuthError(...)` — subclass of `RecostAuthError`; fired once when the consecutive-401 streak reaches `max_consecutive_auth_failures`. After this, `transport.send()` becomes a silent no-op until the process restarts (the SDK assumes the key is permanently wrong, not transiently rejected).
+- `RecostRateLimitError(retry_after_ms, endpoint)` — fired on a 429. The SDK has already parsed `Retry-After` and deferred the next flush — you do not need to take action; this is just a heads-up for logging.
+
+### Fork safety
+
+In environments that fork worker processes (Gunicorn, uWSGI, multiprocessing pools), the SDK automatically re-initializes the flush timer and transport in each child:
+
+- On any platform that supports `os.register_at_fork`, the SDK installs an `after_in_child` hook that runs `handle.reinit_after_fork()` for you.
+- For wrappers that bypass that hook (uWSGI lazy-fork, some embedded runtimes), the first intercepted outbound call in the child triggers the rebuild via a PID backstop check. The first time this fires, `on_error` is called once with a `RecostError` describing what happened.
+- You can also call `handle.reinit_after_fork()` explicitly from your own post-fork hook. It is idempotent within a PID — a no-op if the timer thread is already alive in the current process.
+
+### Process lifecycle
+
+For short-lived processes (CLI scripts, cron jobs, Lambda functions, SIGTERM'd containers) the flush timer runs on a daemon thread and dies on exit. `init()` therefore registers an `atexit` handler by default that runs the final flush at normal termination. It delegates to the same idempotent `dispose()` you can call explicitly. Disable with `auto_shutdown_handlers=False` if your host application owns lifecycle.
+
+For paths that bypass `atexit` (`os._exit`, signal-handler exits, test runners that hard-kill workers), call `handle.flush_blocking(timeout_s=...)` to guarantee the last window settles before you tear the process down.
+
+### Observing flush outcomes
+
+```python
+handle = init(RecostConfig(api_key="rc-..."))
+# ... after some traffic ...
+status = handle.last_flush_status  # FlushStatus | None
+if status is not None and status.status == "error":
+    log.warning("recost: last flush errored, window_size=%d", status.window_size)
+```
+
+`last_flush_status` reflects only the most recent flush — it's a heartbeat for dashboards or health checks, not a complete event stream. For per-flush observation, use `on_error`.
+
 ## Supported providers
 
 Built-in rules ship for the providers below. Cost estimates are rough per-request averages for relative comparison — actual costs vary by model, token count, and region.
@@ -256,12 +316,27 @@ Unrecognized hosts still appear in telemetry, grouped under `"unknown"`.
 
 ```python
 from recost import (
-    RawEvent,       # A single intercepted HTTP request
-    MetricEntry,    # Aggregated stats for one provider + endpoint + method
-    WindowSummary,  # Flush payload sent to the API or VS Code extension
-    RecostConfig,   # SDK configuration
-    ProviderDef,    # A custom provider matching rule
-    TransportMode,  # Literal["local", "cloud"]
+    # Lifecycle
+    init, RecostHandle,
+    # Data shapes
+    RawEvent,            # A single intercepted HTTP request
+    MetricEntry,         # Aggregated stats for one provider + endpoint + method
+    WindowSummary,       # Flush payload sent to the API, VS Code extension, or local file
+    FlushStatus,         # Outcome of the most recent flush
+    # Configuration
+    RecostConfig,
+    ProviderDef,         # A custom provider matching rule
+    TransportMode,       # Literal["local", "cloud"]
+    LocalTransportMode,  # Literal["file", "ws"]
+    # Errors (all inherit from RecostError, which inherits from Exception)
+    RecostError,
+    RecostAuthError,
+    RecostFatalAuthError,
+    RecostRateLimitError,
+    # Lower-level building blocks (most users won't need these)
+    ProviderRegistry, MatchResult, BUILTIN_PROVIDERS,
+    install, uninstall, is_installed,
+    Aggregator, MAX_BUCKETS,
 )
 ```
 

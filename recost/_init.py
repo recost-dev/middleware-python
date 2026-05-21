@@ -245,7 +245,7 @@ def init(config: Optional[RecostConfig] = None) -> RecostHandle:
         aggregator = Aggregator(
             project_id=config.project_id or "",
             environment=config.environment,
-            sdk_version="0.1.0",
+            sdk_version="0.1.3",
             max_buckets=config.max_buckets,
         )
         transport = Transport(config)
